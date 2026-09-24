@@ -1,0 +1,31 @@
+{
+  "name": "edit-epub",
+  "version": "1.0.0",
+  "description": "AI-powered EPUB editor for heading normalization, H2/H3 insertion, TOC rebuild, and typo correction",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "unpack": "tsx src/cli/unpack.ts",
+    "pack": "tsx src/cli/pack.ts",
+    "toc": "tsx src/cli/updateToc.ts",
+    "inspect": "tsx src/cli/inspect.ts",
+    "build": "tsc"
+  },
+  "keywords": ["epub", "gemini", "ai", "toc", "editor"],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.18.1",
+  "dependencies": {
+    "@google/genai": "2.24.0",
+    "cheerio": "1.2.0",
+    "commander": "15.0.0",
+    "dotenv": "18.0.3",
+    "jszip": "3.10.2"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}

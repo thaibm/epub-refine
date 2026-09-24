@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.epub
+input/*.epub
+output/*.epub
+!input/.gitkeep
+!output/.gitkeep
+.DS_Store
+workspace/
+extracted/
