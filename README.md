@@ -45,12 +45,21 @@ edit-epub/
 ## Quy trình làm việc đề xuất (Với Git Diff Review)
 
 ### Bước 1: Đặt file sách vào thư mục `input/` và giải nén
-- Bạn chỉ cần copy bất kỳ file sách nào vào thư mục `./input/` (ví dụ `input/Minh_La_Ca_Viec_Cua_Minh_La_Boi.epub`).
-- Chạy lệnh giải nén:
+- Bạn có thể đặt một hoặc nhiều file `.epub` vào thư mục `./input/`.
+- Chạy lệnh giải nén với nhiều cách linh hoạt:
   ```bash
+  # Cách 1: Menu tương tác (khi có nhiều file, script sẽ hiển thị danh sách đánh số 1, 2, 3... để bạn gõ chọn)
   pnpm run unpack
+
+  # Cách 2: Chọn nhanh theo số thứ tự (1-based index)
+  pnpm run unpack 2
+
+  # Cách 3: Tìm kiếm theo từ khoá hoặc tên sách (không phân biệt hoa thường, không cần gõ dấu tiếng Việt)
+  pnpm run unpack "Dan Koe"
+  pnpm run unpack minh
+  pnpm run unpack -i 2
   ```
-  *(Script sẽ tự động tìm file `.epub` trong `input/`, giải nén vào `./workspace/` và tạo commit Git gốc ban đầu).*
+  *(Script sẽ giải nén file đã chọn vào `./workspace/` và khởi tạo commit Git gốc ban đầu).*
 
 ### Bước 2: Chạy AI cập nhật trực tiếp trên thư mục
 ```bash
@@ -86,16 +95,32 @@ Sau khi đã hài lòng với tất cả các thay đổi:
 ```bash
 pnpm run pack
 ```
-*File xuất ra sẽ tự động được lưu vào thư mục `./output/` (ví dụ: `output/Minh_La_Ca_Viec_Cua_Minh_La_Boi_edited.epub`).*
+*File xuất ra sẽ tự động được lưu vào thư mục `./output/` đúng theo tên file gốc đã giải nén (ví dụ: `output/Minh_La_Ca_Viec_Cua_Minh_La_Boi_edited.epub`).*
 
 ---
 
 ## Chạy 1 bước tự động (All-in-one)
-Nếu không cần duyệt thủ công từng bước, bạn chỉ cần đặt sách vào `input/` và chạy:
+Nếu không cần duyệt thủ công từng bước, bạn có thể chạy trực tiếp:
 ```bash
+# Chọn file cụ thể theo số thứ tự hoặc từ khoá:
+pnpm start -i 2
+pnpm start -i "Dan Koe"
+pnpm start -i minh
+
+# Hoặc chạy trực tiếp (script sẽ hiển thị danh sách file để bạn chọn nếu workspace trống hoặc khi dùng --fresh):
 pnpm start
+pnpm start --fresh
 ```
-Script sẽ tự động: đọc sách từ `input/` -> giải nén -> chạy AI cập nhật -> hiển thị tóm tắt Git diff -> đóng gói ra thư mục `output/`.
+
+---
+
+## Kiểm tra cấu trúc sách (Inspect)
+Để xem trước số lượng chương, thẻ tiêu đề và cấu trúc của bất kỳ file nào trong `input/`:
+```bash
+pnpm run inspect         # Hiện danh sách file trong input/ để chọn
+pnpm run inspect 2       # Kiểm tra file số 2
+pnpm run inspect "Dan"   # Kiểm tra theo từ khoá
+```
 
 ---
 
@@ -103,11 +128,14 @@ Script sẽ tự động: đọc sách từ `input/` -> giải nén -> chạy AI
 
 | Tham số | Mô tả | Mặc định |
 |---|---|---|
-| `-i, --input <path>` | File EPUB đầu vào | Tự động chọn file `.epub` trong thư mục |
+| `-i, --input <query>` | Số thứ tự [1-N], tên file, từ khoá hoặc đường dẫn file trong `input/` | Hiển thị menu chọn hoặc tự nhận diện |
 | `-o, --output <path>` | File EPUB đầu ra | `<tên_gốc>_edited.epub` |
+| `-d, --dir <path>` | Thư mục làm việc giải nén (có Git tracking) | `./workspace` |
 | `-k, --api-key <key>` | Gemini API Key | Đọc từ `.env` |
-| `-m, --model <model>` | Tên model Gemini | `gemini-2.5-flash` |
+| `-m, --model <model>` | Tên model Gemini | `gemini-3.6-flash` |
 | `--start <n>` | Bắt đầu từ chương thứ `n` (1-indexed) | `1` |
 | `--limit <n>` | Chỉ xử lý tối đa `n` chương | Toàn bộ chương |
 | `--dry-run` | Chạy thử nghiệm in log, không ghi file | `false` |
+| `--fresh` | Bắt buộc giải nén lại từ file EPUB gốc | `false` |
+| `--no-pack` | Không tự động đóng gói, giữ nguyên workspace để duyệt Git | `false` |
 | `--delay <ms>` | Thời gian nghỉ giữa các chương để tránh rate limit | `2000` (2 giây) |

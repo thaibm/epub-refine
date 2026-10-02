@@ -3,13 +3,15 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import dotenv from 'dotenv';
 import { Command } from 'commander';
-import { unpackEpubToDir, loadEpubFromDir, packEpubFromDir } from './core/epubArchive.js';
+import { unpackEpubToDir, loadEpubFromDir, packEpubFromDir, getSourceEpubMeta } from './core/epubArchive.js';
 import { OpfManager } from './core/opfManager.js';
 import { ChapterDomProcessor } from './core/domProcessor.js';
 import { TocBuilder } from './core/tocBuilder.js';
 import { GeminiClient } from './ai/geminiClient.js';
 import { buildChapterPrompt } from './ai/prompts.js';
 import type { HeadingItem } from './types/index.js';
+import { splitMultiChapterFiles, isTableOfContentsFile, CHAPTER_REGEX } from './core/chapterSplitter.js';
+import { selectOrResolveEpub } from './core/fileSelector.js';
 
 dotenv.config();
 
@@ -19,7 +21,7 @@ program
   .name('edit-epub')
   .description('AI-powered EPUB editor: chuẩn hoá H1, chèn H2/H3, sửa chính tả và tái tạo TOC')
   .version('1.0.0')
-  .option('-i, --input <path>', 'Đường dẫn file EPUB đầu vào')
+  .option('-i, --input <path>', 'Số thứ tự [1-N], tên file, từ khoá hoặc đường dẫn file EPUB trong input/')
   .option('-o, --output <path>', 'Đường dẫn file EPUB đầu ra')
   .option('-d, --dir <path>', 'Thư mục làm việc giải nén (có Git tracking)', './workspace')
   .option('-k, --api-key <key>', 'Google Gemini API Key (nếu không set trong .env)')
@@ -56,25 +58,38 @@ async function main() {
       console.error(`❌ Lỗi: Thư mục "${workspaceDir}" không tồn tại.`);
       process.exit(1);
     }
-    let bookName = path.basename(workspaceDir);
-    try {
-      const containerPath = path.join(workspaceDir, 'META-INF/container.xml');
-      if (fs.existsSync(containerPath)) {
-        const containerXml = fs.readFileSync(containerPath, 'utf-8');
-        const fullPathMatch = containerXml.match(/full-path="([^"]+)"/);
-        if (fullPathMatch) {
-          const opfPath = path.join(workspaceDir, fullPathMatch[1]);
-          if (fs.existsSync(opfPath)) {
-            const opfXml = fs.readFileSync(opfPath, 'utf-8');
-            const titleMatch = opfXml.match(/<dc:title[^>]*>([^<]+)<\/dc:title>/i);
-            if (titleMatch) {
-              bookName = titleMatch[1].trim().replace(/[/\\?%*:|"<>]/g, '_');
+    let bookName: string | undefined;
+    const sourceMeta = getSourceEpubMeta(workspaceDir);
+    if (sourceMeta?.baseName) {
+      bookName = sourceMeta.baseName;
+    } else {
+      try {
+        const containerPath = path.join(workspaceDir, 'META-INF/container.xml');
+        if (fs.existsSync(containerPath)) {
+          const containerXml = fs.readFileSync(containerPath, 'utf-8');
+          const fullPathMatch = containerXml.match(/full-path="([^"]+)"/);
+          if (fullPathMatch) {
+            const opfPath = path.join(workspaceDir, fullPathMatch[1]);
+            if (fs.existsSync(opfPath)) {
+              const opfXml = fs.readFileSync(opfPath, 'utf-8');
+              const titleMatch = opfXml.match(/<dc:title[^>]*>([^<]+)<\/dc:title>/i);
+              if (titleMatch) {
+                bookName = titleMatch[1]
+                  .replace(/&#x([0-9a-fA-F]+);/g, (_, code) => String.fromCharCode(parseInt(code, 16)))
+                  .replace(/&#([0-9]+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
+                  .trim()
+                  .replace(/[/\\?%*:|"<>]/g, '_');
+              }
             }
           }
         }
+      } catch {
+        // fallback
       }
-    } catch {
-      // fallback
+    }
+
+    if (!bookName) {
+      bookName = path.basename(workspaceDir);
     }
 
     const outputPath = options.output ? path.resolve(options.output) : path.join(outputDir, `${bookName}_edited.epub`);
@@ -84,8 +99,9 @@ async function main() {
     return;
   }
 
-  // 1. Xác định file đầu vào (nếu cần giải nén)
-  let inputPath = options.input;
+  // 1. Xác định file đầu vào và chuẩn bị thư mục làm việc (workspace)
+  let inputPath: string | undefined;
+  let chosenBaseName: string | undefined;
   const inputDir = path.resolve('input');
   if (!fs.existsSync(inputDir)) {
     await fs.promises.mkdir(inputDir, { recursive: true });
@@ -95,46 +111,50 @@ async function main() {
     fs.existsSync(path.join(workspaceDir, 'mimetype')) &&
     fs.existsSync(path.join(workspaceDir, 'META-INF'));
 
-  if (inputPath) {
-    if (!fs.existsSync(inputPath) && fs.existsSync(path.join(inputDir, inputPath))) {
-      inputPath = path.join(inputDir, inputPath);
+  const existingMeta = isAlreadyUnpacked ? getSourceEpubMeta(workspaceDir) : undefined;
+
+  if (options.input) {
+    const selected = await selectOrResolveEpub(options.input, { actionName: 'xử lý' });
+    inputPath = selected.fullPath;
+    chosenBaseName = selected.baseName;
+
+    const sameBookInWorkspace =
+      isAlreadyUnpacked && existingMeta?.fileName === selected.fileName;
+
+    if (!isAlreadyUnpacked || options.fresh || !sameBookInWorkspace) {
+      console.log(`[1/4] Đang giải nén EPUB "${selected.fileName}" ra thư mục riêng "${workspaceDir}"...`);
+      await unpackEpubToDir(inputPath, workspaceDir, true);
+      console.log(`   🌱 Đã khởi tạo Git repository riêng với commit gốc (bản chưa sửa).`);
+    } else {
+      console.log(`[1/4] Thư mục "${workspaceDir}" đã có sẵn nội dung của "${selected.fileName}" (sử dụng lại).`);
+      console.log(`   💡 (Dùng cờ --fresh nếu bạn muốn giải nén đè lại từ đầu).`);
     }
   } else if (!isAlreadyUnpacked || options.fresh) {
-    // Ưu tiên tìm file epub trong thư mục input/
-    const searchDirs = [
-      inputDir,
-      process.cwd(),
-      path.resolve(process.cwd(), '..', 'input'),
-      path.resolve(process.cwd(), '..')
-    ];
-    for (const dir of searchDirs) {
-      if (!fs.existsSync(dir)) continue;
-      const epubs = fs.readdirSync(dir).filter((f) => f.endsWith('.epub') && !f.endsWith('_edited.epub'));
-      if (epubs.length > 0) {
-        inputPath = path.join(dir, epubs[0]);
-        break;
-      }
-    }
+    const selected = await selectOrResolveEpub(undefined, { actionName: 'xử lý' });
+    inputPath = selected.fullPath;
+    chosenBaseName = selected.baseName;
 
-    if (inputPath) {
-      console.log(`[Auto-detect] Đã tự động chọn file EPUB: "${path.basename(inputPath)}" (từ ${path.dirname(inputPath)})`);
-    } else {
-      console.error('❌ Lỗi: Không tìm thấy file .epub nào.');
-      console.error('👉 Hãy đặt file sách vào thư mục: ./input/ hoặc truyền tham số -i <tên_file.epub>');
-      process.exit(1);
+    console.log(`[1/4] Đang giải nén EPUB "${selected.fileName}" ra thư mục riêng "${workspaceDir}"...`);
+    await unpackEpubToDir(inputPath, workspaceDir, true);
+    console.log(`   🌱 Đã khởi tạo Git repository riêng với commit gốc (bản chưa sửa).`);
+  } else {
+    chosenBaseName = existingMeta?.baseName;
+    console.log(`[1/4] Sử dụng nội dung EPUB có sẵn trong thư mục "${workspaceDir}".`);
+    if (existingMeta?.fileName) {
+      console.log(`   📖 Sách đang xử lý: "${existingMeta.fileName}"`);
     }
-  }
-
-  if (inputPath && !fs.existsSync(inputPath)) {
-    console.error(`❌ Lỗi: Không tìm thấy file "${inputPath}"`);
-    process.exit(1);
+    console.log(`   💡 (Mẹo: Để chọn file khác trong input/, hãy dùng: pnpm start -i <số_thứ_tự|tên_file> hoặc --fresh)`);
   }
 
   let outputPath = options.output ? path.resolve(options.output) : undefined;
   if (!outputPath) {
-    const baseName = inputPath
-      ? path.basename(inputPath, path.extname(inputPath))
-      : 'book';
+    let baseName = chosenBaseName;
+    if (!baseName && inputPath) {
+      baseName = path.basename(inputPath, path.extname(inputPath));
+    }
+    if (!baseName) {
+      baseName = 'book';
+    }
     outputPath = path.join(outputDir, `${baseName}_edited.epub`);
   }
 
@@ -153,28 +173,28 @@ async function main() {
   console.log(`\n======================================================`);
   console.log(`📖 BẮT ĐẦU XỬ LÝ EPUB`);
   if (inputPath) console.log(`📖 File gốc: ${path.basename(inputPath)}`);
+  else if (existingMeta?.fileName) console.log(`📖 File gốc: ${existingMeta.fileName}`);
   console.log(`📁 Thư mục làm việc: ${workspaceDir}`);
   console.log(`🤖 Model AI: ${options.model}`);
   console.log(`💾 File xuất dự kiến: ${outputPath}`);
   if (options.dryRun) console.log(`🔍 Chế độ: DRY-RUN (chỉ kiểm tra, không ghi file)`);
   console.log(`======================================================\n`);
 
-  // 3. Giải nén EPUB (hoặc tái sử dụng thư mục đã có)
-  if (!isAlreadyUnpacked || options.fresh) {
-    console.log(`[1/4] Đang giải nén EPUB ra thư mục riêng "${workspaceDir}"...`);
-    await unpackEpubToDir(inputPath!, workspaceDir, true);
-    console.log(`   🌱 Đã khởi tạo Git repository riêng với commit gốc (bản chưa sửa).`);
-  } else {
-    console.log(`[1/4] Thư mục "${workspaceDir}" đã có sẵn nội dung EPUB (sử dụng lại).`);
-  }
-
   const unpacked = loadEpubFromDir(workspaceDir);
   const opfPath = OpfManager.findOpfPath(unpacked);
-  const opfManager = new OpfManager(unpacked, opfPath);
-  const pkg = opfManager.getPackageInfo();
+  let opfManager = new OpfManager(unpacked, opfPath);
+  let pkg = opfManager.getPackageInfo();
 
   console.log(`   - Tựa sách: "${pkg.metadata.title}"`);
   console.log(`   - Tác giả: ${pkg.metadata.creator || 'Chưa rõ'}`);
+
+  // Tự động phân tách các file XHTML chứa nhiều chương thành các file độc lập
+  const splitResult = splitMultiChapterFiles(unpacked, opfManager);
+  if (splitResult.splitFilesCount > 0) {
+    // Reload lại OPF manager sau khi đã bổ sung các file mới vào manifest và spine
+    opfManager = new OpfManager(unpacked, opfPath);
+    pkg = opfManager.getPackageInfo();
+  }
 
   // 4. Lấy danh sách chương
   const allFiles = opfManager.getSpineChapterFiles();
@@ -186,7 +206,21 @@ async function main() {
 
     try {
       const html = unpacked.getFileString(ch.zipPath);
+      // Nhận diện và bỏ qua trang Mục lục (Inline TOC) để không gửi cho AI chỉnh sửa làm chương
+      if (isTableOfContentsFile(html, ch.relativeHref)) return false;
+
       const text = html.toLowerCase();
+
+      // Bỏ qua trang chỉ có ảnh bìa hoặc ảnh đơn lẻ không có nội dung chữ (như index_split_000.html)
+      const hasImg = html.includes('<img') || html.includes('<image');
+      const hasFewText = !html.includes('<p') && !html.includes('<div class="calibre1"');
+      if (hasImg && hasFewText) return false;
+
+      // Bỏ qua trang bìa lót / thông tin sách ngắn không có nội dung chương (như index_split_001.html)
+      if (html.length < 2000 && !CHAPTER_REGEX.test(text) && !text.includes('giới thiệu') && !text.includes('lời nói đầu') && !text.includes('mở đầu')) {
+        return false;
+      }
+
       if (text.includes('table of contents') && text.includes('calibre_generated_inline_toc')) return false;
       if (text.includes('mục lục | table of contents')) return false;
       if (text.includes('thông tin ebook') && html.length < 3000) return false;
@@ -345,14 +379,18 @@ async function main() {
   opfManager.save();
   console.log(`   - Đã sinh mới & thêm vào manifest: ${navZipPath} (EPUB 3 Navigation Document)`);
 
-  // Cập nhật các trang Mục lục nội dung đọc trực tiếp trong sách (Inline TOC như part0001.html, part0014.html)
+  // Cập nhật các trang Mục lục nội dung đọc trực tiếp trong sách (Inline TOC như part0001.html, part0014.html, index_split_003.html)
   const allWorkspaceFiles = unpacked.listFiles();
   for (const f of allWorkspaceFiles) {
     if (!f.endsWith('.html') && !f.endsWith('.xhtml')) continue;
+    // Bỏ qua nav.xhtml vì nav.xhtml là EPUB 3 Navigation Document chuyên dụng, đã tạo ở trên
+    if (f === 'nav.xhtml' || f.endsWith('/nav.xhtml')) continue;
+
     const content = unpacked.getFileString(f);
     const lower = content.toLowerCase();
 
     const isInlineToc =
+      isTableOfContentsFile(content, f) ||
       lower.includes('mục lục | table of contents') ||
       lower.includes('calibre_generated_inline_toc') ||
       (lower.includes('table of contents') && (lower.includes('<ul class="level"') || lower.includes("<ul class='level'")));

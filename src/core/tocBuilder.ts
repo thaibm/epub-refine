@@ -131,7 +131,7 @@ ${navPointsXml}  </navMap>
   }
 
   /**
-   * Cập nhật trang mục lục đọc trực tiếp trong sách (Inline Reading TOC như text/part0001.html hay part0014.html)
+   * Cập nhật trang mục lục đọc trực tiếp trong sách (Inline Reading TOC như part0001.html, part0014.html, index_split_003.html)
    */
   static updateInlineToc(
     tocHtmlContent: string,
@@ -145,7 +145,7 @@ ${navPointsXml}  </navMap>
     const tocFileDir = path.posix.dirname(tocFileRelativeZipPath);
 
     function renderList(nodes: HeadingItem[], depth = 1): string {
-      const ulClass = depth === 1 ? 'level' : `level level-h${depth}`;
+      const ulClass = depth === 1 ? 'toc-list level' : `level level-h${depth}`;
       let html = `<ul class="${ulClass}">\n`;
       for (const node of nodes) {
         const [targetPath, targetHash] = node.href.split('#');
@@ -155,8 +155,8 @@ ${navPointsXml}  </navMap>
         const safeTitle = escapeXml(node.title);
         const safeHref = escapeXml(relLink);
 
-        html += `  <li class="calibre5">`;
-        html += `<a href="${safeHref}" class="pcalibre calibre6">${safeTitle}</a>`;
+        html += `  <li class="toc-item calibre5">`;
+        html += `<a href="${safeHref}" class="toc-link pcalibre calibre6">${safeTitle}</a>`;
         if (node.children && node.children.length > 0) {
           html += '\n' + renderList(node.children, depth + 1);
         }
@@ -168,17 +168,43 @@ ${navPointsXml}  </navMap>
 
     const newUlHtml = renderList(tree);
 
-    // Tìm thẻ danh sách cũ để thay thế
+    // 1. Nếu có thẻ ul/ol sẵn thì thay thế
     const targetUl = $('ul.level, ul, ol').first();
     if (targetUl.length > 0) {
       targetUl.replaceWith(newUlHtml);
     } else {
-      const cardBody = $('.cardbody');
-      if (cardBody.length > 0) {
-        cardBody.append(newUlHtml);
+      // 2. Nếu là file mục lục dạng các thẻ p liên kết (như Calibre index_split_003.html)
+      const linkParagraphs = $('p, div').filter((_, el) => {
+        const $el = $(el);
+        const a = $el.find('a[href]');
+        return a.length > 0 && ($el.is('p') || $el.hasClass('calibre8'));
+      });
+
+      if (linkParagraphs.length > 0) {
+        linkParagraphs.first().before(newUlHtml);
+        linkParagraphs.remove();
+        // Dọn dẹp các thẻ div spacer rỗng cũ xung quanh danh sách
+        $('div').each((_, el) => {
+          const $d = $(el);
+          const cls = $d.attr('class') || '';
+          if (cls.includes('calibre_3') || cls.includes('calibre_5') || cls.includes('calibre_9')) {
+            const t = $d.text().replace(/\s+/g, ' ').trim();
+            if (!t || t === ' ' || t === '&#160;') {
+              $d.remove();
+            }
+          }
+        });
       } else {
-        $('body').append(newUlHtml);
+        const container = $('body > div.calibre1, body > div, body').first();
+        container.append(newUlHtml);
       }
+    }
+
+    // Đảm bảo có h1 hoặc h2 "Mục lục"
+    const existingHeading = $('h1, h2').first();
+    if (existingHeading.length === 0) {
+      const container = $('body > div.calibre1, body > div, body').first();
+      container.prepend('<h1 class="chapter-h1">Mục lục</h1>');
     }
 
     return $.xml();

@@ -1,18 +1,16 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { unpackEpub } from '../core/epubArchive.js';
 import { OpfManager } from '../core/opfManager.js';
 import { ChapterDomProcessor } from '../core/domProcessor.js';
+import { selectOrResolveEpub } from '../core/fileSelector.js';
 
 async function main() {
-  const epubFile = process.argv[2] || 'Takeshi Furukawa - Minh La Ca Viec Cua Minh La Boi.epub';
-  if (!fs.existsSync(epubFile)) {
-    console.error(`Không tìm thấy file: ${epubFile}`);
-    process.exit(1);
-  }
+  const query = process.argv[2];
+  const selectedEpub = await selectOrResolveEpub(query, { actionName: 'kiểm tra' });
+  const epubFile = selectedEpub.fullPath;
 
   console.log(`\n========================================`);
-  console.log(`Kiểm tra cấu trúc EPUB: ${path.basename(epubFile)}`);
+  console.log(`Kiểm tra cấu trúc EPUB: ${selectedEpub.fileName} (${selectedEpub.sizeFormatted})`);
   console.log(`========================================\n`);
 
   const unpacked = await unpackEpub(epubFile);

@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
 import type { HeadingItem, HeadingSuggestion, SpellingFix } from '../types/index.js';
+import { CHAPTER_REGEX } from './chapterSplitter.js';
 
 export interface TopElementInfo {
   index: number;
@@ -26,24 +27,67 @@ export class ChapterDomProcessor {
         decodeEntities: false
       }
     });
+
+    // Tự động phân tách các thẻ <p> chứa nhiều thẻ <br/> (do Calibre gộp đoạn văn) thành các đoạn văn riêng
+    this.unpackParagraphs();
   }
 
   /**
-   * Lấy danh sách các phần tử đầu trang (khoảng 10 phần tử đầu tiên trong body)
+   * Xác định container chính chứa nội dung (tránh xoá nhầm thẻ wrapper ngoài cùng như div.calibre1)
+   */
+  getContentContainer(): cheerio.Cheerio<any> {
+    if (this.$('body > div.calibre1').length > 0) {
+      return this.$('body > div.calibre1');
+    }
+    if (this.$('body > div').length === 1 && this.$('body > *').length === 1) {
+      return this.$('body > div');
+    }
+    return this.$('body');
+  }
+
+  /**
+   * Phân tách các thẻ <p> có chứa nhiều <br/> (thường gặp ở sách Calibre convert từ MOBI/PRC)
+   * thành các thẻ <p> riêng biệt chuẩn HTML
+   */
+  unpackParagraphs(): void {
+    this.$('body p').each((_, pEl) => {
+      const $p = this.$(pEl);
+      const brs = $p.find('br');
+      if (brs.length >= 2) {
+        const rawHtml = $p.html();
+        if (!rawHtml) return;
+        const parts = rawHtml.split(/<br[^>]*>/i).map((s) => s.trim()).filter(Boolean);
+        if (parts.length > 1) {
+          const pClass = $p.attr('class') || '';
+          const pId = $p.attr('id');
+          const newParagraphs = parts.map((part, i) => {
+            const idAttr = (i === 0 && pId) ? ` id="${pId}"` : '';
+            const classAttr = pClass ? ` class="${pClass}"` : '';
+            return `<p${classAttr}${idAttr}>${part}</p>`;
+          }).join('\n');
+          $p.replaceWith(newParagraphs);
+        }
+      }
+    });
+  }
+
+  /**
+   * Lấy danh sách các phần tử đầu trang trong container
    * để AI phân tích xác định H1 chuẩn và các thẻ trùng lặp cần dọn dẹp.
    */
   getTopElements(maxCount = 10): TopElementInfo[] {
     const results: TopElementInfo[] = [];
     let count = 0;
+    const container = this.getContentContainer();
 
-    this.$('body > *').each((i, el) => {
+    container.children().each((i, el) => {
       if (count >= maxCount) return;
       const $el = this.$(el);
-      const text = $el.text().trim();
+      const text = $el.text().replace(/\s+/g, ' ').trim();
       const tagName = (el as any).tagName?.toLowerCase() || '';
 
-      // Bỏ qua div rỗng (thường là anchor calibre như <div class="calibre2"></div>)
-      if (tagName === 'div' && !text) {
+      // Bỏ qua div rỗng (spacer như <div class="calibre_3">&#160;</div>)
+      if (tagName === 'div' && (!text || text === ' ' || text === '&#160;')) {
         return;
       }
 
@@ -51,7 +95,7 @@ export class ChapterDomProcessor {
         index: count,
         tagName,
         text,
-        id: $el.attr('id'),
+        id: $el.attr('id') || $el.find('a[id]').attr('id'),
         className: $el.attr('class')
       });
       count++;
@@ -81,19 +125,28 @@ export class ChapterDomProcessor {
    * Chuẩn hoá H1:
    * - Tạo thẻ <h1 id="..." class="chapter-h1">...</h1>
    * - Giữ lại anchor id cũ (nếu có thẻ h4/h3/p cũ có id) để không làm gãy liên kết bên ngoài
-   * - Xoá các thẻ trùng lặp thừa ở đầu trang
+   * - Xoá các thẻ trùng lặp thừa ở đầu trang trong container
    */
   normalizeH1(newH1Title: string, removeTopIndices: number[] = [], preferredId?: string): string {
+    const container = this.getContentContainer();
     let chosenId = preferredId;
 
-    // Tìm xem trong các thẻ đầu trang có ID nào sẵn có không (ví dụ id="C2")
+    // Tìm xem trong các thẻ đầu trang có ID nào sẵn có không (ví dụ id="filepos8338")
     if (!chosenId) {
-      this.$('body h1, body h2, body h3, body h4, body h5, body h6, body p').slice(0, 5).each((_, el) => {
+      container.find('h1, h2, h3, h4, h5, h6, a[id], p[id]').slice(0, 5).each((_, el) => {
         const id = this.$(el).attr('id');
-        if (id && !chosenId) {
+        if (id && !chosenId && !id.startsWith('calibre_pb')) {
           chosenId = id;
         }
       });
+      if (!chosenId) {
+        container.find('h1, h2, h3, h4, h5, h6, p').slice(0, 5).each((_, el) => {
+          const id = this.$(el).attr('id');
+          if (id && !chosenId) {
+            chosenId = id;
+          }
+        });
+      }
     }
 
     if (!chosenId) {
@@ -105,12 +158,12 @@ export class ChapterDomProcessor {
     const elementsToRemove: cheerio.Cheerio<any>[] = [];
     let firstElementToReplace: cheerio.Cheerio<any> | null = null;
 
-    this.$('body > *').each((i, el) => {
+    container.children().each((i, el) => {
       const $el = this.$(el);
-      const text = $el.text().trim();
+      const text = $el.text().replace(/\s+/g, ' ').trim();
       const tagName = (el as any).tagName?.toLowerCase() || '';
 
-      if (tagName === 'div' && !text) return; // giữ lại div anchor rỗng nếu có
+      if (tagName === 'div' && (!text || text === ' ' || text === '&#160;')) return;
 
       if (removeTopIndices.includes(topCount)) {
         if (!firstElementToReplace) {
@@ -131,19 +184,13 @@ export class ChapterDomProcessor {
       }
     } else {
       // Nếu không chỉ định thẻ cần xoá, kiểm tra xem có h1 sẵn chưa
-      const existingH1 = this.$('body h1').first();
+      const existingH1 = container.find('h1').first();
       if (existingH1.length > 0) {
         existingH1.attr('id', chosenId);
         existingH1.addClass('chapter-h1');
         existingH1.text(newH1Title);
       } else {
-        // Chèn vào đầu body (sau div rỗng nếu có)
-        const firstDiv = this.$('body > div').first();
-        if (firstDiv.length > 0 && !firstDiv.text().trim()) {
-          firstDiv.after(h1Html);
-        } else {
-          this.$('body').prepend(h1Html);
-        }
+        container.prepend(h1Html);
       }
     }
 
@@ -229,14 +276,19 @@ export class ChapterDomProcessor {
       if (tagName === 'h2') level = 2;
       else if (tagName === 'h3') level = 3;
 
-      let id = $el.attr('id');
+      const title = $el.text().trim();
+      if (!title) return;
+
+      // Các tiêu đề khớp mẫu "Chương 1", "Chapter 1"... luôn được gán Level 1 (mục chính)
+      if (CHAPTER_REGEX.test(title)) {
+        level = 1;
+      }
+
+      let id = $el.attr('id') || $el.find('a[id]').attr('id');
       if (!id) {
         id = `hdr-${level}-${Math.random().toString(36).substring(2, 7)}`;
         $el.attr('id', id);
       }
-
-      const title = $el.text().trim();
-      if (!title) return;
 
       list.push({
         id,

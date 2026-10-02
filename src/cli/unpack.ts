@@ -1,52 +1,25 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import { unpackEpubToDir } from '../core/epubArchive.js';
+import { selectOrResolveEpub } from '../core/fileSelector.js';
 
 const program = new Command();
 
 program
   .name('unpack')
   .description('Giải nén file EPUB ra một thư mục riêng biệt và khởi tạo Git để dễ dàng theo dõi diff')
-  .argument('[epub-file]', 'Đường dẫn file EPUB (nếu để trống sẽ tự tìm file .epub)')
+  .argument('[epub-file]', 'Số thứ tự [1-N], tên file, từ khoá tìm kiếm hoặc đường dẫn file EPUB (nếu để trống sẽ hiển thị danh sách lựa chọn)')
+  .option('-i, --input <query>', 'Số thứ tự [1-N], tên file hoặc từ khoá tìm kiếm file trong input/')
   .option('-d, --dir <path>', 'Thư mục đích để giải nén', './workspace')
   .action(async (epubFileArg, options) => {
-    let epubPath = epubFileArg;
-    const inputDir = path.resolve('input');
-
-    if (epubPath) {
-      // Nếu user truyền đường dẫn nhưng chưa đúng, kiểm tra thử trong input/
-      if (!fs.existsSync(epubPath) && fs.existsSync(path.join(inputDir, epubPath))) {
-        epubPath = path.join(inputDir, epubPath);
-      }
-    } else {
-      // Ưu tiên tìm trong thư mục input/
-      const searchDirs = [inputDir, process.cwd(), path.resolve(process.cwd(), '..', 'input'), path.resolve(process.cwd(), '..')];
-      for (const dir of searchDirs) {
-        if (!fs.existsSync(dir)) continue;
-        const epubs = fs.readdirSync(dir).filter((f) => f.endsWith('.epub') && !f.endsWith('_edited.epub'));
-        if (epubs.length > 0) {
-          epubPath = path.join(dir, epubs[0]);
-          break;
-        }
-      }
-
-      if (!epubPath) {
-        console.error('❌ Lỗi: Không tìm thấy file .epub nào trong thư mục input/ hoặc thư mục hiện tại.');
-        console.error('👉 Hãy đặt file sách vào thư mục: ./input/');
-        process.exit(1);
-      }
-    }
-
-    if (!fs.existsSync(epubPath)) {
-      console.error(`❌ Lỗi: Không tìm thấy file "${epubPath}"`);
-      process.exit(1);
-    }
-
+    const query = options.input || epubFileArg;
+    const selectedEpub = await selectOrResolveEpub(query, { actionName: 'giải nén' });
+    const epubPath = selectedEpub.fullPath;
     const targetDir = path.resolve(options.dir);
+
     console.log(`\n======================================================`);
     console.log(`📦 ĐANG GIẢI NÉN EPUB RA THƯ MỤC RIÊNG`);
-    console.log(`📖 File nguồn: ${path.basename(epubPath)}`);
+    console.log(`📖 File nguồn: ${selectedEpub.fileName} (${selectedEpub.sizeFormatted})`);
     console.log(`📁 Thư mục đích: ${targetDir}`);
     console.log(`======================================================\n`);
 

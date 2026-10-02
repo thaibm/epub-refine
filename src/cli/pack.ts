@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
-import { packEpubFromDir } from '../core/epubArchive.js';
+import { packEpubFromDir, getSourceEpubMeta } from '../core/epubArchive.js';
 
 const program = new Command();
 
@@ -31,14 +31,12 @@ program
 
     let outputPath = options.output;
     if (!outputPath) {
-      // 1. Kiểm tra xem trong input/ có file epub gốc nào không
       let bookName: string | undefined;
-      const inputDirCheck = path.resolve('input');
-      if (fs.existsSync(inputDirCheck)) {
-        const inputEpubs = fs.readdirSync(inputDirCheck).filter((f) => f.endsWith('.epub') && !f.endsWith('_edited.epub'));
-        if (inputEpubs.length > 0) {
-          bookName = path.basename(inputEpubs[0], '.epub');
-        }
+
+      // 1. Kiểm tra metadata sách gốc lúc unpack (.epub-source.json)
+      const sourceMeta = getSourceEpubMeta(inputDir);
+      if (sourceMeta?.baseName) {
+        bookName = sourceMeta.baseName;
       }
 
       // 2. Nếu không có, đọc title từ OPF và decode HTML entities
@@ -66,6 +64,17 @@ program
           }
         } catch {
           // fallback
+        }
+      }
+
+      // 3. Fallback: Nếu trong input/ chỉ có đúng 1 file epub gốc
+      if (!bookName) {
+        const inputDirCheck = path.resolve('input');
+        if (fs.existsSync(inputDirCheck)) {
+          const inputEpubs = fs.readdirSync(inputDirCheck).filter((f) => f.endsWith('.epub') && !f.endsWith('_edited.epub'));
+          if (inputEpubs.length === 1) {
+            bookName = path.basename(inputEpubs[0], '.epub');
+          }
         }
       }
 

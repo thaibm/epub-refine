@@ -54,6 +54,25 @@ export async function unpackEpub(epubPath: string): Promise<UnpackedEpub> {
   };
 }
 
+export interface SourceEpubMeta {
+  sourcePath: string;
+  fileName: string;
+  baseName: string;
+  unpackedAt: string;
+}
+
+export function getSourceEpubMeta(targetDir: string): SourceEpubMeta | undefined {
+  const metaFile = path.join(targetDir, '.epub-source.json');
+  if (fs.existsSync(metaFile)) {
+    try {
+      return JSON.parse(fs.readFileSync(metaFile, 'utf-8')) as SourceEpubMeta;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Tải một thư mục sách đã giải nén trên đĩa vào interface UnpackedEpub,
  * mọi thay đổi qua setFileString sẽ được ghi trực tiếp xuống file trên đĩa để Git theo dõi diff.
@@ -65,7 +84,7 @@ export function loadEpubFromDir(dirPath: string): UnpackedEpub {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     let list: string[] = [];
     for (const entry of entries) {
-      if (entry.name === '.git' || entry.name === '.DS_Store') continue;
+      if (entry.name === '.git' || entry.name === '.DS_Store' || entry.name.startsWith('.')) continue;
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         list = list.concat(getAllFiles(fullPath, baseDir));
@@ -152,6 +171,19 @@ export async function unpackEpubToDir(
     }
   }
 
+  // Lưu file metadata về sách nguồn để các tool pack, index dễ dàng nhận biết
+  const sourceMeta: SourceEpubMeta = {
+    sourcePath: path.resolve(epubPath),
+    fileName: path.basename(epubPath),
+    baseName: path.basename(epubPath, path.extname(epubPath)),
+    unpackedAt: new Date().toISOString()
+  };
+  await fs.promises.writeFile(
+    path.join(targetDir, '.epub-source.json'),
+    JSON.stringify(sourceMeta, null, 2),
+    'utf-8'
+  );
+
   // Khởi tạo git repo riêng trong thư mục giải nén để track diff
   if (initGit) {
     const gitDir = path.join(targetDir, '.git');
@@ -179,7 +211,7 @@ export async function unpackEpubToDir(
 /**
  * Đóng gói thư mục đĩa thành file EPUB chuẩn IDPF:
  * 1. File mimetype nằm đầu tiên, không nén (STORE).
- * 2. Bỏ qua thư mục .git và các file ẩn của hệ thống (.DS_Store).
+ * 2. Bỏ qua thư mục .git, file ẩn (.DS_Store, .epub-source.json, v.v.).
  * 3. Tất cả các file khác nén DEFLATE.
  */
 export async function packEpubFromDir(inputDir: string, outputPath: string): Promise<void> {
@@ -202,7 +234,12 @@ export async function packEpubFromDir(inputDir: string, outputPath: string): Pro
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     let list: string[] = [];
     for (const entry of entries) {
-      if (entry.name === '.git' || entry.name === '.DS_Store' || entry.name === 'mimetype') {
+      if (
+        entry.name === '.git' ||
+        entry.name === '.DS_Store' ||
+        entry.name === 'mimetype' ||
+        entry.name.startsWith('.')
+      ) {
         continue;
       }
       const fullPath = path.join(dir, entry.name);

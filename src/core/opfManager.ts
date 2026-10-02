@@ -135,6 +135,21 @@ export class OpfManager {
   }
 
   /**
+   * Chèn một itemref vào spine ngay sau một itemref mục tiêu
+   */
+  addSpineItemAfter(targetIdref: string, newIdref: string): void {
+    const existing = this.$(`spine > itemref[idref="${newIdref}"]`);
+    if (existing.length > 0) return;
+
+    const target = this.$(`spine > itemref[idref="${targetIdref}"]`);
+    if (target.length > 0) {
+      target.after(`<itemref idref="${newIdref}"/>`);
+    } else {
+      this.$('spine').append(`<itemref idref="${newIdref}"/>`);
+    }
+  }
+
+  /**
    * Lưu lại nội dung OPF đã cập nhật vào unpacked epub
    */
   save(): void {
