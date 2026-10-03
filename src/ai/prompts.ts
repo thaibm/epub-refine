@@ -19,7 +19,7 @@ export function buildChapterPrompt(
 Cuốn sách đang xử lý: "${bookTitle}"
 Tập tin chương: "${chapterFileName}"
 
-Nhiệm vụ của bạn gồm 4 phần (thực hiện đồng thời và toàn diện):
+Nhiệm vụ của bạn gồm 3 phần:
 
 1. CHUẨN HOÁ TIÊU ĐỀ CHƯƠNG (H1):
 Quan sát các phần tử đầu trang dưới đây:
@@ -30,7 +30,9 @@ ${topElementsFormatted}
 - NẾU TẬP TIN LÀ MỘT PHẦN (ví dụ mở đầu bằng "Phần 1", "Phần 2"...):
   + Tiêu đề H1 chuẩn là tên Phần (ví dụ: "Phần 1", "Phần 5").
   + Các chương bên trong (như "Chương 1", "Chương 2"...) đã có sẵn tiêu đề H2 trong bài, TUYỆT ĐỐI KHÔNG đề xuất lại thẻ heading H2 cho các tên chương đã có này. Chỉ đề xuất H3 cho các tiểu mục con bên trong chương nếu có.
-- Liệt kê các chỉ số (Index) trong topElements cần loại bỏ/thay thế vì bị lặp lại hoặc rác.
+- Liệt kê các chỉ số (Index) trong topElements cần loại bỏ/thay thế vì bị lặp lại hoặc rác:
+  + CHỈ đưa vào removeTopIndices các dòng lặp lại đúng tên chương hoặc tên sách rác ở đầu trang.
+  + TUYỆT ĐỐI KHÔNG đưa vào removeTopIndices các thẻ tiêu đề phụ (sub-headings, subtitles như <h3>, <h2>) có nội dung độc lập (ví dụ tên tiết, phụ đề chương, câu danh ngôn mở đầu). Các thẻ này phải được GIỮ NGUYÊN trong văn bản.
 
 2. PHÂN TÍCH VÀ BỔ SUNG HEADING 2 (<h2>) VÀ HEADING 3 (<h3>):
 Đọc toàn bộ nội dung các đoạn văn sau:
@@ -48,24 +50,10 @@ ${paragraphsFormatted}
 - QUY TẮC CỰC KỲ QUAN TRỌNG:
   + CHỈ sửa lỗi chính tả thật sự.
   + TUYỆT ĐỐI KHÔNG sửa, xoá hoặc lược bỏ các ký hiệu chú thích như [1], [2], [3], [*], <sup>[1]</sup> trong văn bản. Không được coi các dấu ngoặc vuông chú thích là lỗi chính tả.
-  + Trong "removeTopIndices": CHỈ chỉ định xoá các dòng tiêu đề rác trùng lặp ngắn (ví dụ "Chương 1", tựa sách). TUYỆT ĐỐI KHÔNG xoá đoạn văn mở đầu của truyện chứa nội dung kể chuyện (đoạn văn dài > 60 ký tự).
+  + Trong "removeTopIndices": CHỈ chỉ định xoá các dòng tiêu đề rác trùng lặp ngắn (ví dụ "Chương 1", tựa sách). TUYỆT ĐỐI KHÔNG xoá tiêu đề phụ (h2, h3) độc lập của chương và TUYỆT ĐỐI KHÔNG xoá đoạn văn mở đầu của truyện chứa nội dung kể chuyện (đoạn văn dài > 60 ký tự).
   + TUYỆT ĐỐI KHÔNG viết lại văn phong, KHÔNG tóm tắt hay cắt bớt câu.
   + Giữ nguyên các thuật ngữ tiếng Anh, tên riêng (Ichiro, Oscar Wilde, SMAP, Alderfer,...).
   + Mỗi lỗi chỉ ra chính xác p_idx, từ gốc (original) và từ đã sửa (fixed).
-
-4. NHẬN DIỆN VÀ LIÊN KẾT CHÚ THÍCH (FOOTNOTES / ENDNOTES):
-Nhiều cuốn sách có phần chú thích giải nghĩa từ ngữ, điển tích, tên riêng đặt ở cuối chương (dưới tiêu đề "Chú thích:", "Notes:" hoặc các đoạn bắt đầu bằng "[1]", "[2]", "1. ...", "15 ...") và ký hiệu gọi chú thích nằm trong các đoạn văn thân bài (ví dụ "... Maecenas[1] ...", "... Trimalchio[1] ...", "[*]", "(1)").
-- "footnoteStartIdx": Chỉ số p_idx bắt đầu phần chú thích ở cuối chương (nếu không có, để null).
-- "items": Danh sách các cặp chú thích tìm được. Với mỗi chú thích:
-  + "num": Số hoặc ký hiệu chú thích (ví dụ "1", "2", "*", "15").
-  + "markerText": Ký hiệu chú thích xuất hiện trong thân bài văn bản (ví dụ "[1]", "[*]", "(1)").
-  + "inTextIdx": Chỉ số p_idx của đoạn văn thân bài chứa điểm gọi chú thích.
-  + "defIdx": Chỉ số p_idx của đoạn văn ở cuối chương giải thích chú thích đó.
-  + "term": Thuật ngữ / từ ngữ được chú thích (nếu có, ví dụ "Maecenas", "Trimalchio").
-- LƯU Ý VỀ CHÚ THÍCH:
-  + Nếu chương KHÔNG có chú thích nào, trả về "footnotes": null hoặc "items": [].
-  + TUYỆT ĐỐI KHÔNG gán Heading 2/3 cho các đoạn giải nghĩa chú thích ở cuối chương.
-  + TUYỆT ĐỐI KHÔNG coi ký hiệu chú thích là lỗi chính tả.
 
 HÃY TRẢ VỀ KẾT QUẢ DƯỚI ĐỊNH DẠNG JSON HỢP LỆ VỚI CẤU TRÚC SAU:
 {
@@ -92,19 +80,7 @@ HÃY TRẢ VỀ KẾT QUẢ DƯỚI ĐỊNH DẠNG JSON HỢP LỆ VỚI CẤU T
       "fixed": "cuộc sống",
       "reason": "lỗi gõ dấu"
     }
-  ],
-  "footnotes": {
-    "footnoteStartIdx": 157,
-    "items": [
-      {
-        "num": "1",
-        "markerText": "[1]",
-        "inTextIdx": 2,
-        "defIdx": 157,
-        "term": "Maecenas"
-      }
-    ]
-  }
+  ]
 }
 `;
 }

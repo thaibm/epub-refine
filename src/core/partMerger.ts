@@ -4,6 +4,7 @@ import type { UnpackedEpub } from './epubArchive.js';
 import type { OpfManager } from './opfManager.js';
 import { isTableOfContentsFile } from './chapterSplitter.js';
 import { FootnoteProcessor } from './footnoteProcessor.js';
+import { ensureStandardStyles } from './styleManager.js';
 
 /**
  * Regex phát hiện tiêu đề Phần / Quyển / Tập / Book / Part
@@ -461,23 +462,8 @@ export function mergePartChapters(
     console.log(`   ✅ [${part.partTitle}]: Đã gộp ${part.files.length} chương vào "${targetFile}"`);
   }
 
-  // 5. Cập nhật stylesheet: Đảm bảo có CSS cho .chapter-break và .chapter-h2
-  const cssFiles = unpacked.listFiles().filter((f) => f.endsWith('.css'));
-  for (const cssFile of cssFiles) {
-    let css = unpacked.getFileString(cssFile);
-    let cssModified = false;
-    if (!css.includes('.chapter-break')) {
-      css += `\n\n/* Tự động bổ sung cho các chương được gộp theo phần */\n.chapter-break {\n  page-break-before: always;\n  break-before: page;\n  margin-top: 2em;\n}\n`;
-      cssModified = true;
-    }
-    if (!css.includes('.chapter-h2')) {
-      css += `\n.chapter-h2 {\n  margin-top: 1.5em;\n  margin-bottom: 0.8em;\n  font-size: 1.35em;\n  font-weight: bold;\n}\n`;
-      cssModified = true;
-    }
-    if (cssModified) {
-      unpacked.setFileString(cssFile, css);
-    }
-  }
+  // 5. Cập nhật stylesheet: Đảm bảo có CSS cho .chapter-break và quy chuẩn Typography cho Headings
+  ensureStandardStyles(unpacked);
 
   // 6. Cập nhật các liên kết anchor trên toàn bộ các file còn lại (HTML, NCX)
   if (anchorHrefRemap.size > 0) {

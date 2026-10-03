@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import type { HeadingItem, HeadingSuggestion, SpellingFix, AiFootnoteAnalysis } from '../types/index.js';
+import type { HeadingItem, HeadingSuggestion, SpellingFix } from '../types/index.js';
 import { CHAPTER_REGEX } from './chapterSplitter.js';
 
 export interface TopElementInfo {
@@ -157,8 +157,10 @@ export class ChapterDomProcessor {
     // Xác định các thẻ top cần xoá và trích xuất thẻ chú thích cần bảo tồn
     let topCount = 0;
     const elementsToRemove: cheerio.Cheerio<any>[] = [];
-    let firstElementToReplace: cheerio.Cheerio<any> | null = null;
+    let firstElementToReplace: any = null;
     let preservedFootnotesHtml = '';
+
+    const cleanNewH1 = newH1Title.replace(/\s+/g, ' ').trim().toLowerCase();
 
     container.children().each((i, el) => {
       const $el = this.$(el);
@@ -167,7 +169,10 @@ export class ChapterDomProcessor {
 
       if (tagName === 'div' && (!text || text === ' ' || text === '&#160;')) return;
 
-      if (removeTopIndices.includes(topCount) || (removeTopIndices.length === 0 && topCount === 0)) {
+      const isCandidateForRemoval = removeTopIndices.includes(topCount);
+      const isDefaultFirst = (removeTopIndices.length === 0 && topCount === 0);
+
+      if (isCandidateForRemoval || isDefaultFirst) {
         // Trích xuất các thẻ footnote trong các phần tử sắp bị thay thế / xoá
         $el.find('a[href*="#"]').each((_, aEl) => {
           const $a = this.$(aEl);
@@ -177,16 +182,28 @@ export class ChapterDomProcessor {
           }
         });
 
-        if (removeTopIndices.includes(topCount)) {
+        if (isCandidateForRemoval) {
           // Bảo vệ đoạn văn nội dung: nếu đoạn văn dài (> 80 ký tự) thì không xoá nhầm
           const isLongContent = text.length > 80;
-          if (!isLongContent) {
-            if (!firstElementToReplace) {
-              firstElementToReplace = $el;
-              if (!preferredId && $el.attr('id')) {
-                chosenId = $el.attr('id');
-              }
-            } else {
+
+          // Bảo vệ thẻ heading phụ (h2, h3, h4, h5, h6):
+          // Nếu thẻ là heading độc lập (không trùng lặp với newH1Title), TUYỆT ĐỐI KHÔNG xoá!
+          const isHeadingTag = /^h[2-6]$/.test(tagName);
+          const lowerText = text.toLowerCase();
+          const isHeadingDuplicate = isHeadingTag && (
+            lowerText === cleanNewH1 ||
+            cleanNewH1.startsWith(lowerText) ||
+            lowerText.startsWith(cleanNewH1)
+          );
+
+          if (!firstElementToReplace) {
+            firstElementToReplace = $el;
+            if (!preferredId && $el.attr('id')) {
+              chosenId = $el.attr('id');
+            }
+          } else {
+            // Chỉ xoá nếu không phải nội dung dài và không phải heading phụ hợp lệ
+            if (!isLongContent && (!isHeadingTag || isHeadingDuplicate)) {
               elementsToRemove.push($el);
             }
           }
@@ -195,10 +212,26 @@ export class ChapterDomProcessor {
       topCount++;
     });
 
-    const h1Html = `<h1 id="${chosenId}" class="chapter-h1">${newH1Title}${preservedFootnotesHtml}</h1>`;
+    // Bảo toàn class và style gốc từ phần tử đầu tiên được thay thế
+    let combinedClass = 'chapter-h1';
+    let styleAttr = '';
+    const targetEl: cheerio.Cheerio<any> | null = firstElementToReplace;
+    if (targetEl) {
+      const origClass = targetEl.attr('class');
+      if (origClass) {
+        const cleanedClass = origClass.replace(/\bchapter-h1\b/g, '').trim();
+        combinedClass = cleanedClass ? `${cleanedClass} chapter-h1` : 'chapter-h1';
+      }
+      const origStyle = targetEl.attr('style');
+      if (origStyle) {
+        styleAttr = ` style="${origStyle}"`;
+      }
+    }
 
-    if (firstElementToReplace) {
-      (firstElementToReplace as any).replaceWith(h1Html);
+    const h1Html = `<h1 id="${chosenId}" class="${combinedClass}"${styleAttr}>${newH1Title}${preservedFootnotesHtml}</h1>`;
+
+    if (targetEl) {
+      targetEl.replaceWith(h1Html);
       for (const $rem of elementsToRemove) {
         $rem.remove();
       }
@@ -215,7 +248,9 @@ export class ChapterDomProcessor {
           }
         });
         existingH1.attr('id', chosenId);
-        existingH1.addClass('chapter-h1');
+        if (!existingH1.hasClass('chapter-h1')) {
+          existingH1.addClass('chapter-h1');
+        }
         existingH1.html(`${newH1Title}${preservedFootnotesHtml}`);
       } else {
         container.prepend(h1Html);
@@ -231,7 +266,7 @@ export class ChapterDomProcessor {
   /**
    * Áp dụng các Heading 2 và Heading 3:
    * Tự động nhận diện xem đoạn văn đó là tiêu đề cần thăng cấp (promote) hay chèn mới (insert).
-   * Bảo toàn toàn bộ thẻ chú thích và anchor ID khi thăng cấp <p> thành <h2/h3>.
+   * Bảo toàn toàn bộ thẻ chú thích, class, style và anchor ID khi thăng cấp <p> thành <h2/h3>.
    */
   applyHeadings(headings: HeadingSuggestion[]): void {
     // Sắp xếp ngược từ dưới lên trên để không làm lệch vị trí chèn
@@ -268,7 +303,15 @@ export class ChapterDomProcessor {
       // Sinh hoặc tái sử dụng id duy nhất
       const pId = targetP.attr('id');
       const sectionId = pId || `${tag}-${h.insertBeforeIdx}-${Math.random().toString(36).substring(2, 6)}`;
-      const headingHtml = `<${tag} id="${sectionId}" class="section-${tag}">${cleanTitle}${footnoteHtml}</${tag}>`;
+
+      // Bảo toàn class và style của đoạn văn cũ nếu có
+      const pClass = targetP.attr('class') || '';
+      const pStyle = targetP.attr('style');
+      const cleanedPClass = pClass.replace(new RegExp(`\\bsection-${tag}\\b`, 'g'), '').trim();
+      const headingClass = cleanedPClass ? `${cleanedPClass} section-${tag}` : `section-${tag}`;
+      const styleAttr = pStyle ? ` style="${pStyle}"` : '';
+
+      const headingHtml = `<${tag} id="${sectionId}" class="${headingClass}"${styleAttr}>${cleanTitle}${footnoteHtml}</${tag}>`;
 
       // Kiểm tra: Nếu đoạn <p> chính là dòng tiêu đề (ví dụ text của <p> trùng hoặc tương tự tiêu đề)
       // thì thay thế <p> thành <h2/h3> để không bị lặp chữ
@@ -315,13 +358,13 @@ export class ChapterDomProcessor {
   }
 
   /**
-   * Áp dụng và liên kết chú thích (Footnotes / Endnotes):
-   * - Kết hợp phân tích từ AI (aiFootnotes) và quét DOM thông minh
-   * - Chuyển đổi các ký hiệu chú thích ([1], [*]...) trong bài thành link chuẩn EPUB 3 Pop-up
+   * Áp dụng và liên kết chú thích (Footnotes / Endnotes) cục bộ 100%:
+   * - Quét các định nghĩa chú thích ở cuối chương ([1]..., [*]..., Chú thích:...)
+   * - Tự động liên kết các marker tương ứng trong bài ([1], [*]...) thành link Pop-up EPUB 3
    * - Đóng gói các định nghĩa chú thích ở cuối chương thành thẻ <aside epub:type="footnote">
-   * - Tự động gắn thuộc tính epub:type="noteref" cho các link sẵn có
+   * - Nâng cấp thuộc tính epub:type="noteref" cho các liên kết sẵn có
    */
-  applyFootnotes(aiFootnotes?: AiFootnoteAnalysis | null): {
+  applyFootnotes(): {
     convertedRefs: number;
     convertedDefs: number;
   } {
@@ -335,33 +378,23 @@ export class ChapterDomProcessor {
 
     // 1. Xác định vị trí bắt đầu của danh sách chú thích ở cuối chương
     let fnStartIdx = -1;
-    if (
-      aiFootnotes?.footnoteStartIdx != null &&
-      aiFootnotes.footnoteStartIdx >= 0 &&
-      aiFootnotes.footnoteStartIdx < paragraphs.length
-    ) {
-      fnStartIdx = aiFootnotes.footnoteStartIdx;
-    } else {
-      // Heuristic fallback: Quét từ nửa sau tài liệu
-      for (let i = Math.floor(paragraphs.length / 2); i < paragraphs.length; i++) {
-        const text = this.$(paragraphs[i]).text().trim();
-        if (this.$(paragraphs[i]).find('a[href*="#"]').length > 0) continue;
+    for (let i = Math.floor(paragraphs.length / 2); i < paragraphs.length; i++) {
+      const text = this.$(paragraphs[i]).text().trim();
+      if (this.$(paragraphs[i]).find('a[href*="#"]').length > 0) continue;
 
-        if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
-          fnStartIdx = i;
-          break;
-        }
-        if (/^\s*\[([0-9]+|\*+)\]/.test(text) && this.$(paragraphs[i]).find('a').length === 0) {
-          fnStartIdx = i;
-          break;
-        }
+      if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
+        fnStartIdx = i;
+        break;
+      }
+      if (/^\s*\[([0-9]+|\*+)\]/.test(text) && this.$(paragraphs[i]).find('a').length === 0) {
+        fnStartIdx = i;
+        break;
       }
     }
 
     interface NoteDefItem {
       num: string;
       elements: any[];
-      term?: string;
     }
     const noteDefs: NoteDefItem[] = [];
     let currentNote: NoteDefItem | null = null;
@@ -386,87 +419,28 @@ export class ChapterDomProcessor {
         }
 
         const defMatch = text.match(/^\s*\[([0-9]+|\*+)\]\s*(.*)/) || text.match(/^\s*([0-9]+)\s+([A-ZÀ-Ỹ].*)/);
-        const aiItem = aiFootnotes?.items?.find((item) => item.defIdx === i);
-
-        if (defMatch || aiItem) {
-          const num = aiItem?.num || (defMatch ? (parseInt(defMatch[1], 10) > 10 && noteDefs.length === 0 ? '1' : defMatch[1]) : '1');
+        if (defMatch) {
+          const num = (parseInt(defMatch[1], 10) > 10 && noteDefs.length === 0 ? '1' : defMatch[1]);
           currentNote = {
             num,
-            elements: [pEl],
-            term: aiItem?.term
+            elements: [pEl]
           };
           noteDefs.push(currentNote);
         } else if (currentNote) {
           currentNote.elements.push(pEl);
         }
       }
-    } else if (aiFootnotes?.items && aiFootnotes.items.length > 0) {
-      // Nếu AI phát hiện các định nghĩa cụ thể theo defIdx
-      for (const item of aiFootnotes.items) {
-        const targetP = this.$(`body p[data-pid="${item.defIdx}"]`);
-        if (targetP.length > 0) {
-          noteDefs.push({
-            num: item.num,
-            elements: [targetP[0]],
-            term: item.term
-          });
-        }
-      }
     }
 
     // 2. Thay thế các ký hiệu gọi chú thích trong bài thành link chuẩn Pop-up
     if (noteDefs.length > 0) {
-      const scanLimit = fnStartIdx !== -1 ? fnStartIdx : paragraphs.length;
-
       for (const def of noteDefs) {
         const refId = `fnref_${fileSlug}_${def.num}`;
         const targetId = `fn_${fileSlug}_${def.num}`;
         const linkHtml = `<a id="${refId}" href="#${targetId}" epub:type="noteref" role="doc-noteref" class="noteref"><sup>[${def.num}]</sup></a>`;
 
-        // 2a. Nếu AI đã chỉ ra inTextIdx cụ thể
-        const aiItem = aiFootnotes?.items?.find((it) => it.num === def.num);
-        if (aiItem && aiItem.inTextIdx != null) {
-          const inP = this.$(`body p[data-pid="${aiItem.inTextIdx}"]`);
-          if (inP.length > 0 && inP.find(`a[href="#${targetId}"]`).length === 0) {
-            let pHtml = inP.html() || '';
-            let replaced = false;
-
-            if (aiItem.markerText) {
-              const escMarker = aiItem.markerText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const mRegex = new RegExp(`(?<!<a[^>]*>)${escMarker}`);
-              if (mRegex.test(pHtml)) {
-                pHtml = pHtml.replace(mRegex, linkHtml);
-                inP.html(pHtml);
-                convertedRefs++;
-                replaced = true;
-              }
-            }
-
-            if (!replaced && def.term) {
-              const escTerm = def.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const termMarkerRegex = new RegExp(`(?<!<a[^>]*>)(${escTerm})\\s*\\[?(${def.num}|\\*+)\\]?`);
-              if (termMarkerRegex.test(pHtml)) {
-                pHtml = pHtml.replace(termMarkerRegex, `$1${linkHtml}`);
-                inP.html(pHtml);
-                convertedRefs++;
-                replaced = true;
-              }
-            }
-
-            if (!replaced) {
-              const simpleRegex = new RegExp(`(?<!<a[^>]*>)\\[${def.num}\\]`);
-              if (simpleRegex.test(pHtml)) {
-                pHtml = pHtml.replace(simpleRegex, linkHtml);
-                inP.html(pHtml);
-                convertedRefs++;
-                replaced = true;
-              }
-            }
-          }
-        }
-
-        // 2b. Quét các đoạn văn trước fnStartIdx để bắt marker [num] chưa được link
-        for (let i = 0; i < scanLimit; i++) {
+        // Quét các đoạn văn trước fnStartIdx để gắn link cho marker [num] chưa có link
+        for (let i = 0; i < fnStartIdx; i++) {
           const $p = this.$(paragraphs[i]);
           if ($p.find(`a[href="#${targetId}"]`).length > 0) continue;
 

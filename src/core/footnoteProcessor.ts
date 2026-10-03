@@ -303,7 +303,8 @@ export class FootnoteProcessor {
 
     // 2. Kiểm tra từng Định nghĩa chú thích (Def / Backlink)
     for (const def of defs) {
-      if (!matchedDefKeys.has(def.id) && !matchedDefKeys.has(`${def.file}#${def.id}`)) {
+      const isOrphan = !matchedDefKeys.has(def.id) && !matchedDefKeys.has(`${def.file}#${def.id}`);
+      if (isOrphan) {
         issues.push({
           type: 'orphan_def',
           message: `Chú thích mang ID "#${def.id}" không có đoạn văn nào trong sách gọi tới.`,
@@ -329,7 +330,7 @@ export class FootnoteProcessor {
             targetId: def.id
           });
         }
-      } else {
+      } else if (!isOrphan) {
         issues.push({
           type: 'missing_backlink',
           message: `Chú thích "${def.id}" thiếu đường link quay lại nội dung bài viết.`,
@@ -647,7 +648,7 @@ export class FootnoteProcessor {
 
   /**
    * Quét toàn bộ sách để phát hiện các chú thích dạng văn bản thuần ở cuối chương chưa được gắn thẻ siêu liên kết
-   * (Ví dụ: [1], [2] trong bài viết và danh sách [1]..., [2]... ở cuối chương)
+   * (Ví dụ: [1], [2] trong bài viết và danh sách [1]..., [2]... hoặc bảng <table> ở cuối chương)
    */
   static scanPlaintextFootnotes(unpacked: UnpackedEpub): {
     totalPlaintextNotes: number;
@@ -662,48 +663,95 @@ export class FootnoteProcessor {
       if (this.isFootnoteFile(content, file)) continue;
 
       const $ = cheerio.load(content, { xml: { decodeEntities: false } });
-      const paragraphs = $('body p').toArray();
-      if (paragraphs.length < 5) continue;
-
-      // Tìm vị trí bắt đầu của footnote section ở nửa sau của tài liệu
-      let fnStartIdx = -1;
-      for (let i = Math.floor(paragraphs.length / 2); i < paragraphs.length; i++) {
-        const text = $(paragraphs[i]).text().trim();
-        // Bỏ qua nếu đoạn này đã có thẻ <a> gọi link hoặc thẻ <aside>
-        if ($(paragraphs[i]).find('a[href*="#"]').length > 0) continue;
-
-        if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
-          fnStartIdx = i;
-          break;
-        }
-        if (/^\s*\[([0-9]+|\*+)\]/.test(text) && $(paragraphs[i]).find('a').length === 0) {
-          fnStartIdx = i;
-          break;
-        }
-      }
-
-      if (fnStartIdx === -1) continue;
-
       const notes: { num: string; text: string }[] = [];
-      for (let i = fnStartIdx; i < paragraphs.length; i++) {
-        const $p = $(paragraphs[i]);
-        if ($p.find('a[href*="#"]').length > 0) continue;
 
-        const text = $p.text().trim();
-        if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) continue;
-        if (/^\s*(hết|the end|february|january|march|april|may|june|july|august|september|october|november|december)\b/i.test(text) && i === paragraphs.length - 1) continue;
+      // 1. Quét định nghĩa chú thích trong bảng <table> ở cuối file (rất phổ biến trong sách Calibre / OCR)
+      $('table').each((_, tbl) => {
+        const rows = $(tbl).find('tr');
+        let matchedInTable = 0;
+        const currentTableNotes: { num: string; text: string }[] = [];
 
-        const defMatch = text.match(/^\s*\[([0-9]+|\*+)\]\s*(.*)/) || text.match(/^\s*([0-9]+)\s+([A-ZÀ-Ỹ].*)/);
-        if (defMatch) {
-          const num = (parseInt(defMatch[1], 10) > 10 && notes.length === 0) ? '1' : defMatch[1];
-          notes.push({ num, text });
+        rows.each((_, tr) => {
+          const tds = $(tr).find('td');
+          if (tds.length >= 2) {
+            const rawMarker = $(tds[0]).text().trim();
+            const m = rawMarker.match(/^\[?\s*([0-9]+|\*+)\s*\]?\.?$/);
+            if (m) {
+              matchedInTable++;
+              const num = m[1];
+              const text = $(tds[1]).text().trim();
+              currentTableNotes.push({ num, text });
+
+              // Kiểm tra nếu trong td[1] có chú thích bị gộp như <sup class="..."><span...>3</span></sup> (ví dụ note 2 và note 3 bị OCR ghép chung hàng)
+              $(tds[1]).find('sup').each((_, supEl) => {
+                const innerSupText = $(supEl).text().trim();
+                const supMatch = innerSupText.match(/^\[?\s*([0-9]+|\*+)\s*\]?\.?$/);
+                if (supMatch && supMatch[1] !== num) {
+                  currentTableNotes.push({ num: supMatch[1], text: '' });
+                }
+              });
+            }
+          } else if (tds.length === 1) {
+            const text = $(tds[0]).text().trim();
+            const defMatch = text.match(/^\s*\[([0-9]+|\*+)\]\s*(.*)/) || text.match(/^\s*([0-9]+)\.?\s+([A-ZÀ-Ỹ].*)/);
+            if (defMatch) {
+              matchedInTable++;
+              currentTableNotes.push({ num: defMatch[1], text: defMatch[2] || text });
+            }
+          }
+        });
+
+        if (rows.length > 0 && matchedInTable / rows.length >= 0.5) {
+          notes.push(...currentTableNotes);
+        }
+      });
+
+      // 2. Quét định nghĩa chú thích trong các đoạn <p> ở cuối chương nếu chưa tìm thấy trong bảng
+      if (notes.length === 0) {
+        const paragraphs = $('body p').toArray();
+        if (paragraphs.length >= 5) {
+          let fnStartIdx = -1;
+          for (let i = Math.floor(paragraphs.length / 2); i < paragraphs.length; i++) {
+            const text = $(paragraphs[i]).text().trim();
+            if ($(paragraphs[i]).find('a[href*="#"]').length > 0) continue;
+
+            if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
+              fnStartIdx = i;
+              break;
+            }
+            if (/^\s*\[([0-9]+|\*+)\]/.test(text) && $(paragraphs[i]).find('a').length === 0) {
+              fnStartIdx = i;
+              break;
+            }
+            if (/^\s*([0-9]+)\.\s+[A-ZÀ-Ỹ]/.test(text) && $(paragraphs[i]).find('a').length === 0) {
+              fnStartIdx = i;
+              break;
+            }
+          }
+
+          if (fnStartIdx !== -1) {
+            for (let i = fnStartIdx; i < paragraphs.length; i++) {
+              const $p = $(paragraphs[i]);
+              if ($p.find('a[href*="#"]').length > 0) continue;
+
+              const text = $p.text().trim();
+              if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) continue;
+              if (/^\s*(hết|the end|february|january|march|april|may|june|july|august|september|october|november|december)\b/i.test(text) && i === paragraphs.length - 1) continue;
+
+              const defMatch = text.match(/^\s*\[([0-9]+|\*+)\]\s*(.*)/) || text.match(/^\s*([0-9]+)\.?\s+([A-ZÀ-Ỹ].*)/);
+              if (defMatch) {
+                const num = (parseInt(defMatch[1], 10) > 10 && notes.length === 0) ? '1' : defMatch[1];
+                notes.push({ num, text });
+              }
+            }
+          }
         }
       }
 
       if (notes.length > 0) {
         sections.push({
           file,
-          fnStartIdx,
+          fnStartIdx: 0,
           totalNotes: notes.length,
           notes
         });
@@ -726,58 +774,167 @@ export class FootnoteProcessor {
       if (this.isFootnoteFile(content, file)) continue;
 
       const $ = cheerio.load(content, { xml: { decodeEntities: false } });
-      const paragraphs = $('body p').toArray();
-      if (paragraphs.length < 5) continue;
 
-      let fnStartIdx = -1;
-      for (let i = Math.floor(paragraphs.length / 2); i < paragraphs.length; i++) {
-        const text = $(paragraphs[i]).text().trim();
-        if ($(paragraphs[i]).find('a[href*="#"]').length > 0) continue;
-
-        if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
-          fnStartIdx = i;
-          break;
-        }
-        if (/^\s*\[([0-9]+|\*+)\]/.test(text) && $(paragraphs[i]).find('a').length === 0) {
-          fnStartIdx = i;
-          break;
-        }
-      }
-
-      if (fnStartIdx === -1) continue;
-
-      interface NoteDefItem {
+      interface NoteItem {
         num: string;
-        elements: any[];
+        contentHtml: string;
+        source: 'table' | 'p';
+        tableEl?: any;
+        pElements?: any[];
       }
-      const noteDefs: NoteDefItem[] = [];
-      let currentNote: NoteDefItem | null = null;
+
+      const noteDefs: NoteItem[] = [];
+      const dividerNodesToRemove: any[] = [];
       let headerEl: any = null;
 
-      for (let i = fnStartIdx; i < paragraphs.length; i++) {
-        const pEl = paragraphs[i];
-        const $p = $(pEl);
-        const text = $p.text().trim();
+      // 1. Quét chú thích dạng <table>
+      $('table').each((_, tbl) => {
+        const rows = $(tbl).find('tr');
+        let matchedInTable = 0;
+        const currentDefs: NoteItem[] = [];
 
-        if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
-          headerEl = pEl;
-          continue;
+        rows.each((_, tr) => {
+          const tds = $(tr).find('td');
+          if (tds.length >= 2) {
+            const rawMarker = $(tds[0]).text().trim();
+            const m = rawMarker.match(/^\[?\s*([0-9]+|\*+)\s*\]?\.?$/);
+            if (m) {
+              matchedInTable++;
+              const num = m[1];
+              const $td1 = $(tds[1]);
+
+              // Kiểm tra xem td1 có chứa sup của chú thích tiếp theo bị gộp chung dòng không (như Chapter0015)
+              const embeddedSups = $td1.find('sup').filter((_, sup) => {
+                const st = $(sup).text().trim();
+                return /^\[?\s*([0-9]+|\*+)\s*\]?\.?$/.test(st);
+              });
+
+              if (embeddedSups.length > 0) {
+                // Có note con bị gộp
+                const supEl = embeddedSups.first();
+                const supNumMatch = $(supEl).text().trim().match(/^\[?\s*([0-9]+|\*+)\s*\]?\.?$/);
+                const nextNum = supNumMatch ? supNumMatch[1] : `${parseInt(num, 10) + 1}`;
+
+                // Tách nội dung trước sup và sau sup
+                const fullHtml = $td1.html() || '';
+                const supOuterHtml = $.html(supEl);
+                const parts = fullHtml.split(supOuterHtml);
+
+                currentDefs.push({
+                  num,
+                  contentHtml: parts[0]?.trim() || '',
+                  source: 'table',
+                  tableEl: tbl
+                });
+                currentDefs.push({
+                  num: nextNum,
+                  contentHtml: parts[1]?.trim() || '',
+                  source: 'table',
+                  tableEl: tbl
+                });
+              } else {
+                currentDefs.push({
+                  num,
+                  contentHtml: $td1.html()?.trim() || $td1.text().trim(),
+                  source: 'table',
+                  tableEl: tbl
+                });
+              }
+            }
+          } else if (tds.length === 1) {
+            const text = $(tds[0]).text().trim();
+            const defMatch = text.match(/^\s*\[([0-9]+|\*+)\]\s*(.*)/) || text.match(/^\s*([0-9]+)\.?\s+([A-ZÀ-Ỹ].*)/);
+            if (defMatch) {
+              matchedInTable++;
+              currentDefs.push({
+                num: defMatch[1],
+                contentHtml: defMatch[2] || text,
+                source: 'table',
+                tableEl: tbl
+              });
+            }
+          }
+        });
+
+        if (rows.length > 0 && matchedInTable / rows.length >= 0.5) {
+          noteDefs.push(...currentDefs);
+
+          // Thu thập các node phân cách đứng ngay trước <table> (như '----------------', empty <p>, <hr>)
+          let prev = tbl.prev;
+          while (prev) {
+            if (prev.type === 'text') {
+              if (prev.data.includes('---') || prev.data.includes('___') || prev.data.trim() === '') {
+                dividerNodesToRemove.push(prev);
+              } else {
+                break;
+              }
+            } else if (prev.type === 'tag') {
+              if ($(prev).text().trim() === '' || $(prev).is('hr')) {
+                dividerNodesToRemove.push(prev);
+              } else {
+                break;
+              }
+            }
+            prev = prev.prev;
+          }
+        }
+      });
+
+      // 2. Quét chú thích dạng <p> nếu không có trong bảng
+      let fnStartPIdx = -1;
+      const paragraphs = $('body p').toArray();
+      if (noteDefs.length === 0 && paragraphs.length >= 5) {
+        for (let i = Math.floor(paragraphs.length / 2); i < paragraphs.length; i++) {
+          const text = $(paragraphs[i]).text().trim();
+          if ($(paragraphs[i]).find('a[href*="#"]').length > 0) continue;
+
+          if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
+            fnStartPIdx = i;
+            break;
+          }
+          if (/^\s*\[([0-9]+|\*+)\]/.test(text) && $(paragraphs[i]).find('a').length === 0) {
+            fnStartPIdx = i;
+            break;
+          }
+          if (/^\s*([0-9]+)\.\s+[A-ZÀ-Ỹ]/.test(text) && $(paragraphs[i]).find('a').length === 0) {
+            fnStartPIdx = i;
+            break;
+          }
         }
 
-        if (/^\s*(hết|the end|february|january|march|april|may|june|july|august|september|october|november|december)\b/i.test(text) && i === paragraphs.length - 1) {
-          continue;
-        }
+        if (fnStartPIdx !== -1) {
+          let currentNote: NoteItem | null = null;
+          for (let i = fnStartPIdx; i < paragraphs.length; i++) {
+            const pEl = paragraphs[i];
+            const $p = $(pEl);
+            const text = $p.text().trim();
 
-        const defMatch = text.match(/^\s*\[([0-9]+|\*+)\]\s*(.*)/) || text.match(/^\s*([0-9]+)\s+([A-ZÀ-Ỹ].*)/);
-        if (defMatch) {
-          const num = (parseInt(defMatch[1], 10) > 10 && noteDefs.length === 0) ? '1' : defMatch[1];
-          currentNote = {
-            num,
-            elements: [pEl]
-          };
-          noteDefs.push(currentNote);
-        } else if (currentNote) {
-          currentNote.elements.push(pEl);
+            if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
+              headerEl = pEl;
+              continue;
+            }
+
+            if (/^\s*(hết|the end|february|january|march|april|may|june|july|august|september|october|november|december)\b/i.test(text) && i === paragraphs.length - 1) {
+              continue;
+            }
+
+            const defMatch = text.match(/^\s*\[([0-9]+|\*+)\]\s*(.*)/) || text.match(/^\s*([0-9]+)\.?\s+([A-ZÀ-Ỹ].*)/);
+            if (defMatch) {
+              const num = (parseInt(defMatch[1], 10) > 10 && noteDefs.length === 0) ? '1' : defMatch[1];
+              let cleanHtml = $p.html() || '';
+              cleanHtml = cleanHtml.replace(/^\s*\[?([0-9]+|\*+)\]?\.?\s*/, '').replace(/^\s*[0-9]+\.?\s*(?=[A-ZÀ-Ỹ])/, '');
+              currentNote = {
+                num,
+                contentHtml: cleanHtml.trim(),
+                source: 'p',
+                pElements: [pEl]
+              };
+              noteDefs.push(currentNote);
+            } else if (currentNote && currentNote.pElements) {
+              currentNote.pElements.push(pEl);
+              currentNote.contentHtml += ' ' + ($p.html() || '').trim();
+            }
+          }
         }
       }
 
@@ -785,57 +942,121 @@ export class FootnoteProcessor {
 
       const fileSlug = file.replace(/[^a-zA-Z0-9]/g, '_');
 
-      // 1. Thay thế in-text markers trong các đoạn văn trước fnStartIdx
-      for (let i = 0; i < fnStartIdx; i++) {
-        const pEl = paragraphs[i];
-        const $p = $(pEl);
-        let pHtml = $p.html() || '';
-        let pChanged = false;
+      // 3. Quét & thay thế in-text markers
+      const defBacklinkMap = new Map<string, string>();
+      const refCountMap = new Map<string, number>();
 
-        for (const def of noteDefs) {
-          // Khớp marker [num] chưa được bọc thẻ <a>
+      // A. Quét tất cả thẻ <sup> trong nội dung bài viết
+      const candidateSups = $('sup').filter((_, sup) => {
+        const $s = $(sup);
+        if ($s.closest('a[href*="#"]').length > 0) return false;
+        if ($s.closest('table, aside, .chapter-footnote').length > 0) return false;
+        if (fnStartPIdx !== -1 && $s.closest('p').length > 0) {
+          const pIndex = paragraphs.indexOf($s.closest('p')[0] as any);
+          if (pIndex >= fnStartPIdx) return false;
+        }
+        const text = $s.text().trim();
+        return /^\[?\s*([0-9]+|\*+)\s*\]?\.?$/.test(text);
+      }).toArray();
+
+      const matchedDefIndices = new Set<number>();
+
+      candidateSups.forEach((supEl, supIdx) => {
+        const $sup = $(supEl);
+        const text = $sup.text().trim();
+        const m = text.match(/^\[?\s*([0-9]+|\*+)\s*\]?\.?$/);
+        if (!m) return;
+        const supNum = m[1];
+
+        // Tìm def tương ứng:
+        // Ưu tiên 1: def chưa match có num === supNum
+        let matchedIdx = noteDefs.findIndex((d, idx) => !matchedDefIndices.has(idx) && d.num === supNum);
+
+        // Ưu tiên 2: nếu số lượng sup bằng số lượng def (hoặc gần bằng) và def tại vị trí supIdx chưa match
+        // (xử lý trường hợp typo trong sách gốc, ví dụ: 2 lần [7] trong khi defs có [7] và [8])
+        if (matchedIdx === -1 && candidateSups.length === noteDefs.length && !matchedDefIndices.has(supIdx)) {
+          matchedIdx = supIdx;
+        }
+
+        // Ưu tiên 3: lấy def bất kỳ có num === supNum (trường hợp 1 def được gọi nhiều lần trong bài)
+        if (matchedIdx === -1) {
+          matchedIdx = noteDefs.findIndex((d) => d.num === supNum);
+        }
+
+        if (matchedIdx !== -1) {
+          matchedDefIndices.add(matchedIdx);
+          const targetDef = noteDefs[matchedIdx];
+          const count = (refCountMap.get(targetDef.num) || 0) + 1;
+          refCountMap.set(targetDef.num, count);
+
+          const refId = count === 1 ? `fnref_${fileSlug}_${targetDef.num}` : `fnref_${fileSlug}_${targetDef.num}_${count}`;
+          const targetId = `fn_${fileSlug}_${targetDef.num}`;
+
+          if (!defBacklinkMap.has(targetDef.num)) {
+            defBacklinkMap.set(targetDef.num, refId);
+          }
+
+          const linkHtml = `<a id="${refId}" href="#${targetId}" epub:type="noteref" role="doc-noteref" class="noteref"><sup>[${targetDef.num}]</sup></a>`;
+          $sup.replaceWith(linkHtml);
+        }
+      });
+
+      // B. Fallback: quét văn bản thô cho các def chưa được gọi bởi thẻ <sup>
+      for (let dIdx = 0; dIdx < noteDefs.length; dIdx++) {
+        const def = noteDefs[dIdx];
+        if (defBacklinkMap.has(def.num)) continue;
+
+        const limitPIdx = fnStartPIdx !== -1 ? fnStartPIdx : paragraphs.length;
+        for (let i = 0; i < limitPIdx; i++) {
+          const $p = $(paragraphs[i]);
+          let pHtml = $p.html() || '';
           const markerRegex = new RegExp(`(?<!<a[^>]*>)\\[${def.num}\\]`, 'g');
           if (markerRegex.test(pHtml)) {
             const refId = `fnref_${fileSlug}_${def.num}`;
             const targetId = `fn_${fileSlug}_${def.num}`;
+            defBacklinkMap.set(def.num, refId);
             const linkHtml = `<a id="${refId}" href="#${targetId}" epub:type="noteref" role="doc-noteref" class="noteref"><sup>[${def.num}]</sup></a>`;
-            pHtml = pHtml.replace(markerRegex, linkHtml);
-            pChanged = true;
+            $p.html(pHtml.replace(markerRegex, linkHtml));
+            break;
           }
-        }
-
-        if (pChanged) {
-          $p.html(pHtml);
         }
       }
 
-      // 2. Thay thế các định nghĩa ở cuối chương thành thẻ <aside epub:type="footnote">
+      // 4. Tạo các thẻ <aside epub:type="footnote"> chuẩn EPUB 3 Pop-up
+      const asidesHtml: string[] = [];
       for (const def of noteDefs) {
-        const refId = `fnref_${fileSlug}_${def.num}`;
         const noteId = `fn_${fileSlug}_${def.num}`;
+        const refId = defBacklinkMap.get(def.num);
 
-        const noteLines: string[] = [];
-        def.elements.forEach((el, elIdx) => {
-          let t = $(el).html() || '';
-          if (elIdx === 0) {
-            t = t.replace(/^\s*\[?([0-9]+|\*+)\]?\s*\]?\s*/, '').replace(/^\s*[0-9]+\s*\]?\s*(?=[A-ZÀ-Ỹ])/, '');
-          }
-          if (t.trim()) {
-            noteLines.push(t.trim());
-          }
-        });
+        const aside = refId
+          ? `<aside id="${noteId}" class="chapter-footnote" epub:type="footnote" role="doc-footnote">\n  <p><a href="#${refId}" class="footnote-backlink"><sup>[${def.num}]</sup></a> ${def.contentHtml}</p>\n</aside>`
+          : `<aside id="${noteId}" class="chapter-footnote" epub:type="footnote" role="doc-footnote">\n  <p><sup>[${def.num}]</sup> ${def.contentHtml}</p>\n</aside>`;
 
-        const noteBodyHtml = noteLines.join(' ');
-        const asideHtml = `<aside id="${noteId}" class="chapter-footnote" epub:type="footnote" role="doc-footnote">\n  <p><a href="#${refId}" class="footnote-backlink"><sup>[${def.num}]</sup></a> ${noteBodyHtml}</p>\n</aside>`;
-
-        $(def.elements[0]).replaceWith(asideHtml);
-        for (let k = 1; k < def.elements.length; k++) {
-          $(def.elements[k]).remove();
-        }
+        asidesHtml.push(aside);
         totalConverted++;
       }
 
-      // 3. Xử lý header "Chú thích:" nếu có
+      // 5. Thay thế và dọn dẹp phần định nghĩa cũ
+      const tablesReplaced = new Set<any>();
+      for (const def of noteDefs) {
+        if (def.source === 'table' && def.tableEl && !tablesReplaced.has(def.tableEl)) {
+          tablesReplaced.add(def.tableEl);
+          // Xoá các node phân cách trước bảng (như '----------------', empty <p>, v.v.)
+          dividerNodesToRemove.forEach((node) => $(node).remove());
+          // Thay thế bảng bằng danh sách <aside>
+          $(def.tableEl).replaceWith(`\n<div class="chapter-footnotes-section">\n${asidesHtml.join('\n')}\n</div>\n`);
+        } else if (def.source === 'p' && def.pElements && def.pElements.length > 0) {
+          const refId = defBacklinkMap.get(def.num);
+          const asideContent = refId
+            ? `<p><a href="#${refId}" class="footnote-backlink"><sup>[${def.num}]</sup></a> ${def.contentHtml}</p>`
+            : `<p><sup>[${def.num}]</sup> ${def.contentHtml}</p>`;
+          $(def.pElements[0]).replaceWith(`<aside id="fn_${fileSlug}_${def.num}" class="chapter-footnote" epub:type="footnote" role="doc-footnote">\n  ${asideContent}\n</aside>`);
+          for (let k = 1; k < def.pElements.length; k++) {
+            $(def.pElements[k]).remove();
+          }
+        }
+      }
+
       if (headerEl) {
         $(headerEl).replaceWith('<p class="footnotes-heading"><strong>Chú thích:</strong></p>');
       }

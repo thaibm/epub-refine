@@ -14,6 +14,7 @@ import type { HeadingItem } from './types/index.js';
 import { splitMultiChapterFiles, isTableOfContentsFile, CHAPTER_REGEX } from './core/chapterSplitter.js';
 import { mergePartChapters } from './core/partMerger.js';
 import { selectOrResolveEpub } from './core/fileSelector.js';
+import { ensureStandardStyles } from './core/styleManager.js';
 
 dotenv.config();
 
@@ -211,6 +212,12 @@ async function main() {
     }
   }
 
+  // Tự động chuẩn hoá bộ quy chuẩn Typography cho Headings trong các file CSS của sách
+  const stylesUpdated = ensureStandardStyles(unpacked);
+  if (stylesUpdated) {
+    console.log(`   🎨 Đã thiết lập bộ quy chuẩn Typography (H1, H2, H3, H4) vào stylesheet.`);
+  }
+
   // 4. Lấy danh sách chương
   const allFiles = opfManager.getSpineChapterFiles();
   
@@ -339,11 +346,11 @@ async function main() {
         totalFixes += applied;
       }
 
-      // Xử lý chú thích (Footnotes)
+      // Xử lý chú thích cục bộ (Local Footnotes Processing)
       if (options.footnote !== false) {
-        const fnResult = proc.applyFootnotes(aiResult.footnotes);
+        const fnResult = proc.applyFootnotes();
         if (fnResult.convertedRefs > 0 || fnResult.convertedDefs > 0) {
-          console.log(`   🔖 Chú thích: Đã liên kết ${fnResult.convertedRefs} vị trí gọi và ${fnResult.convertedDefs} định nghĩa Pop-up.`);
+          console.log(`   🔖 Chú thích (Local): Đã liên kết ${fnResult.convertedRefs} vị trí gọi và ${fnResult.convertedDefs} định nghĩa Pop-up.`);
           totalFootnotesConverted += fnResult.convertedRefs;
         }
       }

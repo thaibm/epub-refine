@@ -48,19 +48,6 @@ export interface SpellingFix {
   reason?: string;
 }
 
-export interface FootnoteItemSuggestion {
-  num: string;
-  markerText?: string;
-  inTextIdx: number;
-  defIdx: number;
-  term?: string;
-}
-
-export interface AiFootnoteAnalysis {
-  footnoteStartIdx?: number | null;
-  items: FootnoteItemSuggestion[];
-}
-
 export interface AiChapterAnalysisResult {
   h1: {
     title: string;
@@ -69,5 +56,4 @@ export interface AiChapterAnalysisResult {
   };
   headings: HeadingSuggestion[];
   spellingFixes: SpellingFix[];
-  footnotes?: AiFootnoteAnalysis | null;
 }
