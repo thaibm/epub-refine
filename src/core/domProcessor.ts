@@ -245,6 +245,16 @@ export class ChapterDomProcessor {
       const cleanTitle = h.title.trim();
       const pText = targetP.text().trim();
 
+      // Kiểm tra xem tiêu đề này đã tồn tại sẵn trong file hay chưa (ví dụ H2 tên chương đã có sẵn khi gộp phần)
+      let alreadyExists = false;
+      this.$('h1, h2, h3').each((_, el) => {
+        if (this.$(el).text().replace(/\s+/g, ' ').trim().toLowerCase() === cleanTitle.toLowerCase()) {
+          alreadyExists = true;
+          return false;
+        }
+      });
+      if (alreadyExists) continue;
+
       // Trích xuất chú thích bên trong targetP nếu có
       let footnoteHtml = '';
       targetP.find('a[href*="#"]').each((_, aEl) => {
@@ -538,6 +548,7 @@ export class ChapterDomProcessor {
    */
   collectHeadings(): HeadingItem[] {
     const list: HeadingItem[] = [];
+    const hasH1 = this.$('h1').length > 0;
 
     this.$('h1, h2, h3').each((_, el) => {
       const $el = this.$(el);
@@ -549,8 +560,9 @@ export class ChapterDomProcessor {
       const title = $el.text().trim();
       if (!title) return;
 
-      // Các tiêu đề khớp mẫu "Chương 1", "Chapter 1"... luôn được gán Level 1 (mục chính)
-      if (CHAPTER_REGEX.test(title)) {
+      // Nếu trong file KHÔNG có thẻ h1 nào, nhưng h2 lại là tên chương chính ("Chương 1", "Chapter 1"...)
+      // thì mới thăng cấp lên Level 1 để TOC không bị mồ côi
+      if (!hasH1 && CHAPTER_REGEX.test(title) && level > 1) {
         level = 1;
       }
 

@@ -9,6 +9,7 @@ export interface UnpackedEpub {
   setFileString(filePath: string, content: string): void;
   getFileBuffer(filePath: string): Buffer | undefined;
   setFileBuffer(filePath: string, content: Buffer): void;
+  deleteFile(filePath: string): boolean;
   hasFile(filePath: string): boolean;
   listFiles(): string[];
 }
@@ -44,6 +45,9 @@ export async function unpackEpub(epubPath: string): Promise<UnpackedEpub> {
     },
     setFileBuffer(filePath: string, content: Buffer): void {
       files.set(filePath.replace(/\\/g, '/'), content);
+    },
+    deleteFile(filePath: string): boolean {
+      return files.delete(filePath.replace(/\\/g, '/'));
     },
     hasFile(filePath: string): boolean {
       return files.has(filePath.replace(/\\/g, '/'));
@@ -122,6 +126,14 @@ export function loadEpubFromDir(dirPath: string): UnpackedEpub {
         fs.mkdirSync(parentDir, { recursive: true });
       }
       fs.writeFileSync(fullPath, content);
+    },
+    deleteFile(filePath: string): boolean {
+      const fullPath = path.join(resolvedDir, filePath.replace(/\\/g, '/'));
+      if (fs.existsSync(fullPath)) {
+        fs.unlinkSync(fullPath);
+        return true;
+      }
+      return false;
     },
     hasFile(filePath: string): boolean {
       const fullPath = path.join(resolvedDir, filePath.replace(/\\/g, '/'));

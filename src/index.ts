@@ -12,6 +12,7 @@ import { buildChapterPrompt } from './ai/prompts.js';
 import { FootnoteProcessor } from './core/footnoteProcessor.js';
 import type { HeadingItem } from './types/index.js';
 import { splitMultiChapterFiles, isTableOfContentsFile, CHAPTER_REGEX } from './core/chapterSplitter.js';
+import { mergePartChapters } from './core/partMerger.js';
 import { selectOrResolveEpub } from './core/fileSelector.js';
 
 dotenv.config();
@@ -33,7 +34,9 @@ program
   .option('--renumber-footnotes [style]', 'Đánh số lại thứ tự chú thích toàn sách ("bracket", "star", "number")')
   .option('--dry-run', 'Chỉ chạy phân tích và in kết quả, không ghi đè file', false)
   .option('--fresh', 'Bắt buộc giải nén lại từ file EPUB gốc (ghi đè workspace)', false)
-  .option('--no-pack', 'Không tự động đóng gói EPUB, giữ nguyên thư mục đĩa để duyệt Git diff')
+  .option('--no-merge-parts', 'Không gộp các chương theo từng phần (giữ nguyên từng file riêng lẻ)')
+  .option('--pack', 'Tự động đóng gói file EPUB sau khi xử lý xong (mặc định: tắt, giữ workspace để duyệt Git diff)')
+  .option('--no-pack', 'Không đóng gói file EPUB (mặc định)')
   .option('--pack-only', 'Chỉ đóng gói thư mục workspace thành file EPUB (sau khi đã duyệt)', false)
   .option('--delay <ms>', 'Thời gian nghỉ giữa các chương (ms)', '2000');
 
@@ -197,6 +200,15 @@ async function main() {
     // Reload lại OPF manager sau khi đã bổ sung các file mới vào manifest và spine
     opfManager = new OpfManager(unpacked, opfPath);
     pkg = opfManager.getPackageInfo();
+  }
+
+  // Tự động gộp các chương trong cùng một phần (Phần => Chương) vào 1 file duy nhất để tiết kiệm gọi Gemini API
+  if (options.mergeParts !== false) {
+    const mergeResult = mergePartChapters(unpacked, opfManager);
+    if (mergeResult.mergedPartsCount > 0) {
+      opfManager = new OpfManager(unpacked, opfPath);
+      pkg = opfManager.getPackageInfo();
+    }
   }
 
   // 4. Lấy danh sách chương
@@ -477,9 +489,10 @@ async function main() {
   if (options.dryRun) {
     console.log(`\n[5/5] Bỏ qua đóng gói vì đang chạy ở chế độ DRY-RUN.`);
   } else if (!options.pack) {
-    console.log(`\n[5/5] Đã bỏ qua đóng gói theo tuỳ chọn --no-pack.`);
-    console.log(`   Sau khi duyệt xong qua Git, bạn chỉ cần gõ lệnh sau để tạo file EPUB:`);
+    console.log(`\n[5/5] Không tự động đóng gói EPUB (mặc định để duyệt qua Git diff).`);
+    console.log(`   Sau khi duyệt xong qua Git, bạn có thể đóng gói bằng lệnh:`);
     console.log(`   pnpm run pack --dir "${options.dir}" -o "${outputPath}"`);
+    console.log(`   (Hoặc lần sau chạy trực tiếp kèm cờ: pnpm start --pack)`);
   } else {
     console.log(`\n[5/5] Đang đóng gói lại EPUB chuẩn IDPF (mimetype uncompressed)...`);
     await packEpubFromDir(workspaceDir, outputPath);

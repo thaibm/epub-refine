@@ -27,6 +27,9 @@ ${topElementsFormatted}
 
 - Rất nhiều sách bị lỗi gắn nhầm thẻ tiêu đề thành <h4>, <h3> hoặc <p>, hoặc bị lặp lại/phân mảnh (ví dụ 1 dòng là "Thói Quen Thứ 1", dòng sau lặp lại "THÓI QUEN THỨ 1", dòng thứ 3 là "Chấp nhận toàn bộ con người mình").
 - Hãy xác định tiêu đề H1 ĐẦY ĐỦ, CHÍNH XÁC của chương này (Ví dụ: "Thói Quen Thứ 1: Chấp nhận toàn bộ con người mình").
+- NẾU TẬP TIN LÀ MỘT PHẦN (ví dụ mở đầu bằng "Phần 1", "Phần 2"...):
+  + Tiêu đề H1 chuẩn là tên Phần (ví dụ: "Phần 1", "Phần 5").
+  + Các chương bên trong (như "Chương 1", "Chương 2"...) đã có sẵn tiêu đề H2 trong bài, TUYỆT ĐỐI KHÔNG đề xuất lại thẻ heading H2 cho các tên chương đã có này. Chỉ đề xuất H3 cho các tiểu mục con bên trong chương nếu có.
 - Liệt kê các chỉ số (Index) trong topElements cần loại bỏ/thay thế vì bị lặp lại hoặc rác.
 
 2. PHÂN TÍCH VÀ BỔ SUNG HEADING 2 (<h2>) VÀ HEADING 3 (<h3>):

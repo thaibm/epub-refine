@@ -150,6 +150,51 @@ export class OpfManager {
   }
 
   /**
+   * Chèn một itemref vào spine ngay trước một itemref mục tiêu
+   */
+  addSpineItemBefore(targetIdref: string, newIdref: string): void {
+    const existing = this.$(`spine > itemref[idref="${newIdref}"]`);
+    if (existing.length > 0) return;
+
+    const target = this.$(`spine > itemref[idref="${targetIdref}"]`);
+    if (target.length > 0) {
+      target.before(`<itemref idref="${newIdref}"/>`);
+    } else {
+      this.$('spine').prepend(`<itemref idref="${newIdref}"/>`);
+    }
+  }
+
+  /**
+   * Xoá một item khỏi manifest theo id
+   */
+  removeManifestItem(id: string): void {
+    this.$(`manifest > item[id="${id}"]`).remove();
+  }
+
+  /**
+   * Xoá một itemref khỏi spine theo idref
+   */
+  removeSpineItem(idref: string): void {
+    this.$(`spine > itemref[idref="${idref}"]`).remove();
+  }
+
+  /**
+   * Tìm id trong manifest theo tên file / href tương đối
+   */
+  findManifestIdByHref(href: string): string | undefined {
+    const cleanHref = href.split('#')[0].replace(/\\/g, '/');
+    let foundId: string | undefined;
+    this.$('manifest > item').each((_, el) => {
+      const h = this.$(el).attr('href');
+      if (h && h.replace(/\\/g, '/') === cleanHref) {
+        foundId = this.$(el).attr('id');
+        return false;
+      }
+    });
+    return foundId;
+  }
+
+  /**
    * Lưu lại nội dung OPF đã cập nhật vào unpacked epub
    */
   save(): void {
