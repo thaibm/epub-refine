@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import type { HeadingItem, HeadingSuggestion, SpellingFix } from '../types/index.js';
+import type { HeadingItem, HeadingSuggestion, SpellingFix, AiFootnoteAnalysis } from '../types/index.js';
 import { CHAPTER_REGEX } from './chapterSplitter.js';
 
 export interface TopElementInfo {
@@ -125,13 +125,14 @@ export class ChapterDomProcessor {
    * Chuẩn hoá H1:
    * - Tạo thẻ <h1 id="..." class="chapter-h1">...</h1>
    * - Giữ lại anchor id cũ (nếu có thẻ h4/h3/p cũ có id) để không làm gãy liên kết bên ngoài
+   * - Bảo toàn toàn bộ thẻ liên kết chú thích <a> nếu phần tử đầu trang có chứa
    * - Xoá các thẻ trùng lặp thừa ở đầu trang trong container
    */
   normalizeH1(newH1Title: string, removeTopIndices: number[] = [], preferredId?: string): string {
     const container = this.getContentContainer();
     let chosenId = preferredId;
 
-    // Tìm xem trong các thẻ đầu trang có ID nào sẵn có không (ví dụ id="filepos8338")
+    // Tìm xem trong các thẻ đầu trang có ID nào sẵn có không (ví dụ id="p_1" hoặc id="filepos8338")
     if (!chosenId) {
       container.find('h1, h2, h3, h4, h5, h6, a[id], p[id]').slice(0, 5).each((_, el) => {
         const id = this.$(el).attr('id');
@@ -153,10 +154,11 @@ export class ChapterDomProcessor {
       chosenId = `ch-h1-${Math.random().toString(36).substring(2, 8)}`;
     }
 
-    // Xác định các thẻ top cần xoá
+    // Xác định các thẻ top cần xoá và trích xuất thẻ chú thích cần bảo tồn
     let topCount = 0;
     const elementsToRemove: cheerio.Cheerio<any>[] = [];
     let firstElementToReplace: cheerio.Cheerio<any> | null = null;
+    let preservedFootnotesHtml = '';
 
     container.children().each((i, el) => {
       const $el = this.$(el);
@@ -165,17 +167,35 @@ export class ChapterDomProcessor {
 
       if (tagName === 'div' && (!text || text === ' ' || text === '&#160;')) return;
 
-      if (removeTopIndices.includes(topCount)) {
-        if (!firstElementToReplace) {
-          firstElementToReplace = $el;
-        } else {
-          elementsToRemove.push($el);
+      if (removeTopIndices.includes(topCount) || (removeTopIndices.length === 0 && topCount === 0)) {
+        // Trích xuất các thẻ footnote trong các phần tử sắp bị thay thế / xoá
+        $el.find('a[href*="#"]').each((_, aEl) => {
+          const $a = this.$(aEl);
+          const href = $a.attr('href') || '';
+          if (/chuthich|footnote|fn|note/i.test(href) || $a.find('sup').length > 0 || $a.attr('epub:type') === 'noteref') {
+            preservedFootnotesHtml += this.$.html(aEl);
+          }
+        });
+
+        if (removeTopIndices.includes(topCount)) {
+          // Bảo vệ đoạn văn nội dung: nếu đoạn văn dài (> 80 ký tự) thì không xoá nhầm
+          const isLongContent = text.length > 80;
+          if (!isLongContent) {
+            if (!firstElementToReplace) {
+              firstElementToReplace = $el;
+              if (!preferredId && $el.attr('id')) {
+                chosenId = $el.attr('id');
+              }
+            } else {
+              elementsToRemove.push($el);
+            }
+          }
         }
       }
       topCount++;
     });
 
-    const h1Html = `<h1 id="${chosenId}" class="chapter-h1">${newH1Title}</h1>`;
+    const h1Html = `<h1 id="${chosenId}" class="chapter-h1">${newH1Title}${preservedFootnotesHtml}</h1>`;
 
     if (firstElementToReplace) {
       (firstElementToReplace as any).replaceWith(h1Html);
@@ -186,9 +206,17 @@ export class ChapterDomProcessor {
       // Nếu không chỉ định thẻ cần xoá, kiểm tra xem có h1 sẵn chưa
       const existingH1 = container.find('h1').first();
       if (existingH1.length > 0) {
+        // Trích xuất footnote trong existingH1 nếu có
+        existingH1.find('a[href*="#"]').each((_, aEl) => {
+          const $a = this.$(aEl);
+          const href = $a.attr('href') || '';
+          if (/chuthich|footnote|fn|note/i.test(href) || $a.find('sup').length > 0 || $a.attr('epub:type') === 'noteref') {
+            preservedFootnotesHtml += this.$.html(aEl);
+          }
+        });
         existingH1.attr('id', chosenId);
         existingH1.addClass('chapter-h1');
-        existingH1.text(newH1Title);
+        existingH1.html(`${newH1Title}${preservedFootnotesHtml}`);
       } else {
         container.prepend(h1Html);
       }
@@ -203,6 +231,7 @@ export class ChapterDomProcessor {
   /**
    * Áp dụng các Heading 2 và Heading 3:
    * Tự động nhận diện xem đoạn văn đó là tiêu đề cần thăng cấp (promote) hay chèn mới (insert).
+   * Bảo toàn toàn bộ thẻ chú thích và anchor ID khi thăng cấp <p> thành <h2/h3>.
    */
   applyHeadings(headings: HeadingSuggestion[]): void {
     // Sắp xếp ngược từ dưới lên trên để không làm lệch vị trí chèn
@@ -216,9 +245,20 @@ export class ChapterDomProcessor {
       const cleanTitle = h.title.trim();
       const pText = targetP.text().trim();
 
-      // Sinh id duy nhất
-      const sectionId = `${tag}-${h.insertBeforeIdx}-${Math.random().toString(36).substring(2, 6)}`;
-      const headingHtml = `<${tag} id="${sectionId}" class="section-${tag}">${cleanTitle}</${tag}>`;
+      // Trích xuất chú thích bên trong targetP nếu có
+      let footnoteHtml = '';
+      targetP.find('a[href*="#"]').each((_, aEl) => {
+        const $a = this.$(aEl);
+        const href = $a.attr('href') || '';
+        if (/chuthich|footnote|fn|note/i.test(href) || $a.find('sup').length > 0 || $a.attr('epub:type') === 'noteref') {
+          footnoteHtml += this.$.html(aEl);
+        }
+      });
+
+      // Sinh hoặc tái sử dụng id duy nhất
+      const pId = targetP.attr('id');
+      const sectionId = pId || `${tag}-${h.insertBeforeIdx}-${Math.random().toString(36).substring(2, 6)}`;
+      const headingHtml = `<${tag} id="${sectionId}" class="section-${tag}">${cleanTitle}${footnoteHtml}</${tag}>`;
 
       // Kiểm tra: Nếu đoạn <p> chính là dòng tiêu đề (ví dụ text của <p> trùng hoặc tương tự tiêu đề)
       // thì thay thế <p> thành <h2/h3> để không bị lặp chữ
@@ -245,15 +285,245 @@ export class ChapterDomProcessor {
       const targetP = this.$(`body p[data-pid="${fix.idx}"]`);
       if (targetP.length === 0) continue;
 
+      let fixedText = fix.fixed;
+
+      // Bảo vệ footnote markers: nếu fix.original có [N] hoặc [*] nhưng fix.fixed bị AI vô tình xoá mất
+      const origNoteMatch = fix.original.match(/\[([0-9]+|\*+)\]/);
+      if (origNoteMatch && !fixedText.includes(origNoteMatch[0])) {
+        fixedText = `${fixedText}${origNoteMatch[0]}`;
+      }
+
       const currentHtml = targetP.html() || '';
       // Thay thế chính xác chuỗi gốc
       if (currentHtml.includes(fix.original)) {
-        targetP.html(currentHtml.replace(fix.original, fix.fixed));
+        targetP.html(currentHtml.replace(fix.original, fixedText));
         appliedCount++;
       }
     }
 
     return appliedCount;
+  }
+
+  /**
+   * Áp dụng và liên kết chú thích (Footnotes / Endnotes):
+   * - Kết hợp phân tích từ AI (aiFootnotes) và quét DOM thông minh
+   * - Chuyển đổi các ký hiệu chú thích ([1], [*]...) trong bài thành link chuẩn EPUB 3 Pop-up
+   * - Đóng gói các định nghĩa chú thích ở cuối chương thành thẻ <aside epub:type="footnote">
+   * - Tự động gắn thuộc tính epub:type="noteref" cho các link sẵn có
+   */
+  applyFootnotes(aiFootnotes?: AiFootnoteAnalysis | null): {
+    convertedRefs: number;
+    convertedDefs: number;
+  } {
+    let convertedRefs = 0;
+    let convertedDefs = 0;
+    const fileSlug = this.chapterFileRelativeHref.replace(/[^a-zA-Z0-9]/g, '_');
+    const paragraphs = this.$('body p').toArray();
+    if (paragraphs.length < 3) {
+      return { convertedRefs, convertedDefs };
+    }
+
+    // 1. Xác định vị trí bắt đầu của danh sách chú thích ở cuối chương
+    let fnStartIdx = -1;
+    if (
+      aiFootnotes?.footnoteStartIdx != null &&
+      aiFootnotes.footnoteStartIdx >= 0 &&
+      aiFootnotes.footnoteStartIdx < paragraphs.length
+    ) {
+      fnStartIdx = aiFootnotes.footnoteStartIdx;
+    } else {
+      // Heuristic fallback: Quét từ nửa sau tài liệu
+      for (let i = Math.floor(paragraphs.length / 2); i < paragraphs.length; i++) {
+        const text = this.$(paragraphs[i]).text().trim();
+        if (this.$(paragraphs[i]).find('a[href*="#"]').length > 0) continue;
+
+        if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
+          fnStartIdx = i;
+          break;
+        }
+        if (/^\s*\[([0-9]+|\*+)\]/.test(text) && this.$(paragraphs[i]).find('a').length === 0) {
+          fnStartIdx = i;
+          break;
+        }
+      }
+    }
+
+    interface NoteDefItem {
+      num: string;
+      elements: any[];
+      term?: string;
+    }
+    const noteDefs: NoteDefItem[] = [];
+    let currentNote: NoteDefItem | null = null;
+    let headerEl: any = null;
+
+    if (fnStartIdx !== -1) {
+      for (let i = fnStartIdx; i < paragraphs.length; i++) {
+        const pEl = paragraphs[i];
+        const $p = this.$(pEl);
+        const text = $p.text().trim();
+
+        if (/^\s*(chú thích\s*:?|footnotes\s*:?|notes\s*:?)\s*$/i.test(text)) {
+          headerEl = pEl;
+          continue;
+        }
+
+        if (
+          /^\s*(hết|the end|february|january|march|april|may|june|july|august|september|october|november|december)\b/i.test(text) &&
+          i === paragraphs.length - 1
+        ) {
+          continue;
+        }
+
+        const defMatch = text.match(/^\s*\[([0-9]+|\*+)\]\s*(.*)/) || text.match(/^\s*([0-9]+)\s+([A-ZÀ-Ỹ].*)/);
+        const aiItem = aiFootnotes?.items?.find((item) => item.defIdx === i);
+
+        if (defMatch || aiItem) {
+          const num = aiItem?.num || (defMatch ? (parseInt(defMatch[1], 10) > 10 && noteDefs.length === 0 ? '1' : defMatch[1]) : '1');
+          currentNote = {
+            num,
+            elements: [pEl],
+            term: aiItem?.term
+          };
+          noteDefs.push(currentNote);
+        } else if (currentNote) {
+          currentNote.elements.push(pEl);
+        }
+      }
+    } else if (aiFootnotes?.items && aiFootnotes.items.length > 0) {
+      // Nếu AI phát hiện các định nghĩa cụ thể theo defIdx
+      for (const item of aiFootnotes.items) {
+        const targetP = this.$(`body p[data-pid="${item.defIdx}"]`);
+        if (targetP.length > 0) {
+          noteDefs.push({
+            num: item.num,
+            elements: [targetP[0]],
+            term: item.term
+          });
+        }
+      }
+    }
+
+    // 2. Thay thế các ký hiệu gọi chú thích trong bài thành link chuẩn Pop-up
+    if (noteDefs.length > 0) {
+      const scanLimit = fnStartIdx !== -1 ? fnStartIdx : paragraphs.length;
+
+      for (const def of noteDefs) {
+        const refId = `fnref_${fileSlug}_${def.num}`;
+        const targetId = `fn_${fileSlug}_${def.num}`;
+        const linkHtml = `<a id="${refId}" href="#${targetId}" epub:type="noteref" role="doc-noteref" class="noteref"><sup>[${def.num}]</sup></a>`;
+
+        // 2a. Nếu AI đã chỉ ra inTextIdx cụ thể
+        const aiItem = aiFootnotes?.items?.find((it) => it.num === def.num);
+        if (aiItem && aiItem.inTextIdx != null) {
+          const inP = this.$(`body p[data-pid="${aiItem.inTextIdx}"]`);
+          if (inP.length > 0 && inP.find(`a[href="#${targetId}"]`).length === 0) {
+            let pHtml = inP.html() || '';
+            let replaced = false;
+
+            if (aiItem.markerText) {
+              const escMarker = aiItem.markerText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const mRegex = new RegExp(`(?<!<a[^>]*>)${escMarker}`);
+              if (mRegex.test(pHtml)) {
+                pHtml = pHtml.replace(mRegex, linkHtml);
+                inP.html(pHtml);
+                convertedRefs++;
+                replaced = true;
+              }
+            }
+
+            if (!replaced && def.term) {
+              const escTerm = def.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const termMarkerRegex = new RegExp(`(?<!<a[^>]*>)(${escTerm})\\s*\\[?(${def.num}|\\*+)\\]?`);
+              if (termMarkerRegex.test(pHtml)) {
+                pHtml = pHtml.replace(termMarkerRegex, `$1${linkHtml}`);
+                inP.html(pHtml);
+                convertedRefs++;
+                replaced = true;
+              }
+            }
+
+            if (!replaced) {
+              const simpleRegex = new RegExp(`(?<!<a[^>]*>)\\[${def.num}\\]`);
+              if (simpleRegex.test(pHtml)) {
+                pHtml = pHtml.replace(simpleRegex, linkHtml);
+                inP.html(pHtml);
+                convertedRefs++;
+                replaced = true;
+              }
+            }
+          }
+        }
+
+        // 2b. Quét các đoạn văn trước fnStartIdx để bắt marker [num] chưa được link
+        for (let i = 0; i < scanLimit; i++) {
+          const $p = this.$(paragraphs[i]);
+          if ($p.find(`a[href="#${targetId}"]`).length > 0) continue;
+
+          let pHtml = $p.html() || '';
+          const markerRegex = new RegExp(`(?<!<a[^>]*>)\\[${def.num}\\]`, 'g');
+          if (markerRegex.test(pHtml)) {
+            pHtml = pHtml.replace(markerRegex, linkHtml);
+            $p.html(pHtml);
+            convertedRefs++;
+          }
+        }
+      }
+
+      // 3. Chuyển đổi các định nghĩa ở cuối chương thành <aside epub:type="footnote">
+      for (const def of noteDefs) {
+        const refId = `fnref_${fileSlug}_${def.num}`;
+        const noteId = `fn_${fileSlug}_${def.num}`;
+
+        const noteLines: string[] = [];
+        def.elements.forEach((el, elIdx) => {
+          let t = this.$(el).html() || '';
+          if (elIdx === 0) {
+            t = t.replace(/^\s*\[?([0-9]+|\*+)\]?\s*\]?\s*/, '').replace(/^\s*[0-9]+\s*\]?\s*(?=[A-ZÀ-Ỹ])/, '');
+          }
+          if (t.trim()) {
+            noteLines.push(t.trim());
+          }
+        });
+
+        const noteBodyHtml = noteLines.join(' ');
+        const asideHtml = `<aside id="${noteId}" class="chapter-footnote" epub:type="footnote" role="doc-footnote">\n  <p><a href="#${refId}" class="footnote-backlink"><sup>[${def.num}]</sup></a> ${noteBodyHtml}</p>\n</aside>`;
+
+        this.$(def.elements[0]).replaceWith(asideHtml);
+        for (let k = 1; k < def.elements.length; k++) {
+          this.$(def.elements[k]).remove();
+        }
+        convertedDefs++;
+      }
+
+      // 4. Chuẩn hoá tiêu đề "Chú thích:"
+      if (headerEl) {
+        this.$(headerEl).replaceWith('<p class="footnotes-heading"><strong>Chú thích:</strong></p>');
+      }
+    }
+
+    // 5. Nâng cấp các thẻ <a> chú thích đã có sẵn lên chuẩn EPUB 3 Pop-up
+    this.$('a[href*="#"]').each((_, el) => {
+      const $a = this.$(el);
+      const href = $a.attr('href') || '';
+      const [, targetId] = href.split('#');
+      if (!targetId) return;
+
+      if (/^(chuthich|footnote|fn|note)/i.test(targetId) || $a.find('sup').length > 0) {
+        if (!$a.attr('epub:type')) {
+          $a.attr('epub:type', 'noteref');
+          $a.attr('role', 'doc-noteref');
+        }
+      }
+    });
+
+    // 6. Đảm bảo thuộc tính xmlns:epub trên <html>
+    const $html = this.$('html');
+    if (!$html.attr('xmlns:epub')) {
+      $html.attr('xmlns:epub', 'http://www.idpf.org/2007/ops');
+    }
+
+    return { convertedRefs, convertedDefs };
   }
 
   /**

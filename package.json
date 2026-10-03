@@ -1,7 +1,7 @@
 {
   "name": "edit-epub",
   "version": "1.0.0",
-  "description": "AI-powered EPUB editor for heading normalization, H2/H3 insertion, TOC rebuild, and typo correction",
+  "description": "AI-powered EPUB editor for heading normalization, H2/H3 insertion, TOC rebuild, typo correction, and EPUB 3 popup footnote processing",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -10,9 +10,10 @@
     "pack": "tsx src/cli/pack.ts",
     "toc": "tsx src/cli/updateToc.ts",
     "inspect": "tsx src/cli/inspect.ts",
+    "footnote": "tsx src/cli/footnote.ts",
     "build": "tsc"
   },
-  "keywords": ["epub", "gemini", "ai", "toc", "editor"],
+  "keywords": ["epub", "gemini", "ai", "toc", "editor", "footnote"],
   "author": "",
   "license": "ISC",
   "packageManager": "pnpm@10.18.1",

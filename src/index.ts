@@ -9,6 +9,7 @@ import { ChapterDomProcessor } from './core/domProcessor.js';
 import { TocBuilder } from './core/tocBuilder.js';
 import { GeminiClient } from './ai/geminiClient.js';
 import { buildChapterPrompt } from './ai/prompts.js';
+import { FootnoteProcessor } from './core/footnoteProcessor.js';
 import type { HeadingItem } from './types/index.js';
 import { splitMultiChapterFiles, isTableOfContentsFile, CHAPTER_REGEX } from './core/chapterSplitter.js';
 import { selectOrResolveEpub } from './core/fileSelector.js';
@@ -19,7 +20,7 @@ const program = new Command();
 
 program
   .name('edit-epub')
-  .description('AI-powered EPUB editor: chuẩn hoá H1, chèn H2/H3, sửa chính tả và tái tạo TOC')
+  .description('AI-powered EPUB editor: chuẩn hoá H1, chèn H2/H3, sửa chính tả, liên kết chú thích và tái tạo TOC')
   .version('1.0.0')
   .option('-i, --input <path>', 'Số thứ tự [1-N], tên file, từ khoá hoặc đường dẫn file EPUB trong input/')
   .option('-o, --output <path>', 'Đường dẫn file EPUB đầu ra')
@@ -28,6 +29,8 @@ program
   .option('-m, --model <model>', 'Tên Gemini Model', process.env.GEMINI_MODEL || 'gemini-3.6-flash')
   .option('--start <number>', 'Bắt đầu từ chương thứ mấy (1-based)', '1')
   .option('--limit <number>', 'Giới hạn số lượng chương cần xử lý (để test trước)')
+  .option('--no-footnote', 'Bỏ qua nhận diện và xử lý chú thích', false)
+  .option('--renumber-footnotes [style]', 'Đánh số lại thứ tự chú thích toàn sách ("bracket", "star", "number")')
   .option('--dry-run', 'Chỉ chạy phân tích và in kết quả, không ghi đè file', false)
   .option('--fresh', 'Bắt buộc giải nén lại từ file EPUB gốc (ghi đè workspace)', false)
   .option('--no-pack', 'Không tự động đóng gói EPUB, giữ nguyên thư mục đĩa để duyệt Git diff')
@@ -122,11 +125,11 @@ async function main() {
       isAlreadyUnpacked && existingMeta?.fileName === selected.fileName;
 
     if (!isAlreadyUnpacked || options.fresh || !sameBookInWorkspace) {
-      console.log(`[1/4] Đang giải nén EPUB "${selected.fileName}" ra thư mục riêng "${workspaceDir}"...`);
+      console.log(`[1/5] Đang giải nén EPUB "${selected.fileName}" ra thư mục riêng "${workspaceDir}"...`);
       await unpackEpubToDir(inputPath, workspaceDir, true);
       console.log(`   🌱 Đã khởi tạo Git repository riêng với commit gốc (bản chưa sửa).`);
     } else {
-      console.log(`[1/4] Thư mục "${workspaceDir}" đã có sẵn nội dung của "${selected.fileName}" (sử dụng lại).`);
+      console.log(`[1/5] Thư mục "${workspaceDir}" đã có sẵn nội dung của "${selected.fileName}" (sử dụng lại).`);
       console.log(`   💡 (Dùng cờ --fresh nếu bạn muốn giải nén đè lại từ đầu).`);
     }
   } else if (!isAlreadyUnpacked || options.fresh) {
@@ -134,12 +137,12 @@ async function main() {
     inputPath = selected.fullPath;
     chosenBaseName = selected.baseName;
 
-    console.log(`[1/4] Đang giải nén EPUB "${selected.fileName}" ra thư mục riêng "${workspaceDir}"...`);
+    console.log(`[1/5] Đang giải nén EPUB "${selected.fileName}" ra thư mục riêng "${workspaceDir}"...`);
     await unpackEpubToDir(inputPath, workspaceDir, true);
     console.log(`   🌱 Đã khởi tạo Git repository riêng với commit gốc (bản chưa sửa).`);
   } else {
     chosenBaseName = existingMeta?.baseName;
-    console.log(`[1/4] Sử dụng nội dung EPUB có sẵn trong thư mục "${workspaceDir}".`);
+    console.log(`[1/5] Sử dụng nội dung EPUB có sẵn trong thư mục "${workspaceDir}".`);
     if (existingMeta?.fileName) {
       console.log(`   📖 Sách đang xử lý: "${existingMeta.fileName}"`);
     }
@@ -209,6 +212,9 @@ async function main() {
       // Nhận diện và bỏ qua trang Mục lục (Inline TOC) để không gửi cho AI chỉnh sửa làm chương
       if (isTableOfContentsFile(html, ch.relativeHref)) return false;
 
+      // Nhận diện và bỏ qua file Chú Thích (Footnote/Endnote) để bảo toàn nguyên vẹn
+      if (FootnoteProcessor.isFootnoteFile(html, ch.relativeHref)) return false;
+
       const text = html.toLowerCase();
 
       // Bỏ qua trang chỉ có ảnh bìa hoặc ảnh đơn lẻ không có nội dung chữ (như index_split_000.html)
@@ -250,10 +256,11 @@ async function main() {
   console.log(`   - Sẽ xử lý từ chương ${startIdx + 1} đến ${startIdx + targetChapters.length} (Tổng ${targetChapters.length} chương)\n`);
 
   // 5. Vòng lặp xử lý từng chương qua AI
-  console.log(`[2/4] Đang phân tích và xử lý nội dung từng chương qua AI...`);
+  console.log(`[2/5] Đang phân tích & xử lý nội dung qua AI (H1, H2/H3, Chính tả & Chú thích)...`);
   const allHeadings: HeadingItem[] = [];
   let totalFixes = 0;
   let totalHeadingsAdded = 0;
+  let totalFootnotesConverted = 0;
 
   for (let i = 0; i < targetChapters.length; i++) {
     const ch = targetChapters[i];
@@ -320,6 +327,15 @@ async function main() {
         totalFixes += applied;
       }
 
+      // Xử lý chú thích (Footnotes)
+      if (options.footnote !== false) {
+        const fnResult = proc.applyFootnotes(aiResult.footnotes);
+        if (fnResult.convertedRefs > 0 || fnResult.convertedDefs > 0) {
+          console.log(`   🔖 Chú thích: Đã liên kết ${fnResult.convertedRefs} vị trí gọi và ${fnResult.convertedDefs} định nghĩa Pop-up.`);
+          totalFootnotesConverted += fnResult.convertedRefs;
+        }
+      }
+
       // Thu thập headings đã cập nhật
       const chapterHeadings = proc.collectHeadings();
       allHeadings.push(...chapterHeadings);
@@ -347,8 +363,48 @@ async function main() {
     }
   }
 
-  // 6. Xây dựng lại Table of Contents (TOC)
-  console.log(`\n[3/4] Đang tái tạo Table of Contents (Mục lục đa cấp)...`);
+  // 6. Chuẩn hoá & Tối ưu hoá Chú thích toàn sách (EPUB 3 Pop-up & Auto-repair)
+  if (options.footnote !== false) {
+    console.log(`\n[3/5] Đang tối ưu & kiểm định Chú thích toàn sách (EPUB 3 Pop-up)...`);
+
+    // Quét và chuyển đổi các chú thích text thuần còn sót lại nếu có
+    const plainScan = FootnoteProcessor.scanPlaintextFootnotes(unpacked);
+    if (plainScan.totalPlaintextNotes > 0) {
+      console.log(`   🔗 Tìm thấy ${plainScan.totalPlaintextNotes} chú thích text thuần chưa gắn link, đang tự động liên kết...`);
+      const convertRes = FootnoteProcessor.convertPlaintextFootnotes(unpacked);
+      console.log(`   ✅ Đã chuyển đổi ${convertRes.totalConverted} mục chú thích thành Pop-up.`);
+      totalFootnotesConverted += convertRes.totalConverted;
+    }
+
+    // Đánh số lại thứ tự chú thích nếu người dùng yêu cầu
+    if (options.renumberFootnotes) {
+      let rStyle: 'bracket-number' | 'star' | 'number' = 'bracket-number';
+      if (options.renumberFootnotes === 'star') rStyle = 'star';
+      else if (options.renumberFootnotes === 'number') rStyle = 'number';
+      console.log(`   🔢 Đang đánh số lại thứ tự chú thích liên tục (kiểu: ${rStyle})...`);
+      const ren = FootnoteProcessor.renumberFootnotes(unpacked, rStyle);
+      console.log(`   ✅ Đã đánh số lại ${ren.totalRenumbered} liên kết chú thích.`);
+    }
+
+    // Tự động kiểm tra và sửa liên kết bị gãy (nếu có)
+    const repair = FootnoteProcessor.autoRepair(unpacked);
+    if (repair.repairedCount > 0) {
+      console.log(`   🔧 Đã tự động sửa ${repair.repairedCount} liên kết chú thích.`);
+    }
+
+    // Nâng cấp toàn bộ liên kết còn lại sang EPUB 3 Pop-up
+    const popup = FootnoteProcessor.convertToEpub3Popup(unpacked);
+    if (popup.convertedRefs > 0 || popup.convertedDefs > 0) {
+      console.log(`   🚀 Nâng cấp Pop-up EPUB 3: ${popup.convertedRefs} refs, ${popup.convertedDefs} defs.`);
+    }
+
+    // Kiểm định tổng thể
+    const fnReport = FootnoteProcessor.validate(unpacked);
+    console.log(`   📊 Tổng kết chú thích: ${fnReport.validPairs} cặp liên kết hợp lệ | Lỗi còn lại: ${fnReport.issues.length} | Pop-up: ${fnReport.isEpub3PopupReady ? '✅ Sẵn sàng' : 'Chưa'}`);
+  }
+
+  // 7. Xây dựng lại Table of Contents (TOC)
+  console.log(`\n[4/5] Đang tái tạo Table of Contents (Mục lục đa cấp)...`);
   
   // Thu thập toàn bộ headings từ tất cả các chương nội dung trong sách (đảm bảo không bị thiếu chương)
   const fullBookHeadings: HeadingItem[] = [];
@@ -402,7 +458,7 @@ async function main() {
     }
   }
 
-  // 7. Báo cáo Git Diff
+  // 8. Báo cáo Git Diff
   console.log(`\n======================================================`);
   console.log(`🔍 TỔNG HỢP CÁC THAY ĐỔI QUA GIT`);
   console.log(`======================================================`);
@@ -417,15 +473,15 @@ async function main() {
   console.log(`   git -C "${options.dir}" diff`);
   console.log(`Hoặc mở thư mục "${options.dir}" trong VS Code / IDE để duyệt trực quan.`);
 
-  // 8. Đóng gói lại EPUB
+  // 9. Đóng gói lại EPUB
   if (options.dryRun) {
-    console.log(`\n[4/4] Bỏ qua đóng gói vì đang chạy ở chế độ DRY-RUN.`);
+    console.log(`\n[5/5] Bỏ qua đóng gói vì đang chạy ở chế độ DRY-RUN.`);
   } else if (!options.pack) {
-    console.log(`\n[4/4] Đã bỏ qua đóng gói theo tuỳ chọn --no-pack.`);
+    console.log(`\n[5/5] Đã bỏ qua đóng gói theo tuỳ chọn --no-pack.`);
     console.log(`   Sau khi duyệt xong qua Git, bạn chỉ cần gõ lệnh sau để tạo file EPUB:`);
     console.log(`   pnpm run pack --dir "${options.dir}" -o "${outputPath}"`);
   } else {
-    console.log(`\n[4/4] Đang đóng gói lại EPUB chuẩn IDPF (mimetype uncompressed)...`);
+    console.log(`\n[5/5] Đang đóng gói lại EPUB chuẩn IDPF (mimetype uncompressed)...`);
     await packEpubFromDir(workspaceDir, outputPath);
     console.log(`   ✅ Đã tạo file EPUB mới thành công tại:`);
     console.log(`      ${path.resolve(outputPath)}`);
@@ -436,6 +492,7 @@ async function main() {
   console.log(`   - Số chương đã xử lý: ${targetChapters.length}`);
   console.log(`   - Số heading H2/H3 đã thêm: ${totalHeadingsAdded}`);
   console.log(`   - Số lỗi chính tả đã sửa: ${totalFixes}`);
+  console.log(`   - Số chú thích Pop-up đã tạo/chuẩn hoá: ${totalFootnotesConverted}`);
   console.log(`======================================================\n`);
 }
 

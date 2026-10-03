@@ -19,7 +19,7 @@ export function buildChapterPrompt(
 Cuốn sách đang xử lý: "${bookTitle}"
 Tập tin chương: "${chapterFileName}"
 
-Nhiệm vụ của bạn gồm 3 phần:
+Nhiệm vụ của bạn gồm 4 phần (thực hiện đồng thời và toàn diện):
 
 1. CHUẨN HOÁ TIÊU ĐỀ CHƯƠNG (H1):
 Quan sát các phần tử đầu trang dưới đây:
@@ -44,9 +44,25 @@ ${paragraphsFormatted}
 - Rà soát các lỗi gõ sai dấu, lỗi Telex/VNI trong tiếng Việt (ví dụ: "cuộc sông" -> "cuộc sống", "nổ lực" -> "nỗ lực", "vủa bạn" -> "của bạn", "hiên tại" -> "hiện tại", "bản thân minh" -> "bản thân mình").
 - QUY TẮC CỰC KỲ QUAN TRỌNG:
   + CHỈ sửa lỗi chính tả thật sự.
+  + TUYỆT ĐỐI KHÔNG sửa, xoá hoặc lược bỏ các ký hiệu chú thích như [1], [2], [3], [*], <sup>[1]</sup> trong văn bản. Không được coi các dấu ngoặc vuông chú thích là lỗi chính tả.
+  + Trong "removeTopIndices": CHỈ chỉ định xoá các dòng tiêu đề rác trùng lặp ngắn (ví dụ "Chương 1", tựa sách). TUYỆT ĐỐI KHÔNG xoá đoạn văn mở đầu của truyện chứa nội dung kể chuyện (đoạn văn dài > 60 ký tự).
   + TUYỆT ĐỐI KHÔNG viết lại văn phong, KHÔNG tóm tắt hay cắt bớt câu.
   + Giữ nguyên các thuật ngữ tiếng Anh, tên riêng (Ichiro, Oscar Wilde, SMAP, Alderfer,...).
   + Mỗi lỗi chỉ ra chính xác p_idx, từ gốc (original) và từ đã sửa (fixed).
+
+4. NHẬN DIỆN VÀ LIÊN KẾT CHÚ THÍCH (FOOTNOTES / ENDNOTES):
+Nhiều cuốn sách có phần chú thích giải nghĩa từ ngữ, điển tích, tên riêng đặt ở cuối chương (dưới tiêu đề "Chú thích:", "Notes:" hoặc các đoạn bắt đầu bằng "[1]", "[2]", "1. ...", "15 ...") và ký hiệu gọi chú thích nằm trong các đoạn văn thân bài (ví dụ "... Maecenas[1] ...", "... Trimalchio[1] ...", "[*]", "(1)").
+- "footnoteStartIdx": Chỉ số p_idx bắt đầu phần chú thích ở cuối chương (nếu không có, để null).
+- "items": Danh sách các cặp chú thích tìm được. Với mỗi chú thích:
+  + "num": Số hoặc ký hiệu chú thích (ví dụ "1", "2", "*", "15").
+  + "markerText": Ký hiệu chú thích xuất hiện trong thân bài văn bản (ví dụ "[1]", "[*]", "(1)").
+  + "inTextIdx": Chỉ số p_idx của đoạn văn thân bài chứa điểm gọi chú thích.
+  + "defIdx": Chỉ số p_idx của đoạn văn ở cuối chương giải thích chú thích đó.
+  + "term": Thuật ngữ / từ ngữ được chú thích (nếu có, ví dụ "Maecenas", "Trimalchio").
+- LƯU Ý VỀ CHÚ THÍCH:
+  + Nếu chương KHÔNG có chú thích nào, trả về "footnotes": null hoặc "items": [].
+  + TUYỆT ĐỐI KHÔNG gán Heading 2/3 cho các đoạn giải nghĩa chú thích ở cuối chương.
+  + TUYỆT ĐỐI KHÔNG coi ký hiệu chú thích là lỗi chính tả.
 
 HÃY TRẢ VỀ KẾT QUẢ DƯỚI ĐỊNH DẠNG JSON HỢP LỆ VỚI CẤU TRÚC SAU:
 {
@@ -73,7 +89,19 @@ HÃY TRẢ VỀ KẾT QUẢ DƯỚI ĐỊNH DẠNG JSON HỢP LỆ VỚI CẤU T
       "fixed": "cuộc sống",
       "reason": "lỗi gõ dấu"
     }
-  ]
+  ],
+  "footnotes": {
+    "footnoteStartIdx": 157,
+    "items": [
+      {
+        "num": "1",
+        "markerText": "[1]",
+        "inTextIdx": 2,
+        "defIdx": 157,
+        "term": "Maecenas"
+      }
+    ]
+  }
 }
 `;
 }

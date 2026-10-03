@@ -68,6 +68,13 @@ export class GeminiClient {
           if (!Array.isArray(parsed.spellingFixes)) {
             parsed.spellingFixes = [];
           }
+          if (parsed.footnotes && typeof parsed.footnotes === 'object') {
+            if (!Array.isArray(parsed.footnotes.items)) {
+              parsed.footnotes.items = [];
+            }
+          } else {
+            parsed.footnotes = null;
+          }
 
           return parsed;
         } catch (err: any) {
