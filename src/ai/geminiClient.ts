@@ -108,4 +108,87 @@ export class GeminiClient {
 
     throw new Error(`Tất cả các model đều gặp sự cố: ${lastError?.message || 'Không rõ nguyên nhân'}`);
   }
+
+  /**
+   * Gọi Gemini để chuẩn hoá văn bản thô từ PDF thành HTML semantic:
+   * - Sửa lỗi chính tả OCR tiếng Việt
+   * - Nhận diện H1, H2, H3
+   * - Bóc tách chú thích thành [^n] và [^n]: nội dung
+   */
+  async structurePdfContent(prompt: string): Promise<string> {
+    const candidateModels = [
+      this.modelName,
+      'gemini-3.5-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-3.1-flash-lite'
+    ];
+    const uniqueModels = Array.from(new Set(candidateModels));
+
+    let lastError: any = null;
+
+    for (const model of uniqueModels) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const response = await this.ai.models.generateContent({
+            model: model,
+            contents: prompt,
+            config: {
+              temperature: 0.15
+            }
+          });
+
+          const text = response.text;
+          if (!text) {
+            throw new Error('Gemini không trả về nội dung.');
+          }
+
+          let cleanText = text.trim();
+          if (cleanText.startsWith('```html')) {
+            cleanText = cleanText.replace(/^```html\s*/i, '').replace(/```$/i, '').trim();
+          } else if (cleanText.startsWith('```xml')) {
+            cleanText = cleanText.replace(/^```xml\s*/i, '').replace(/```$/i, '').trim();
+          } else if (cleanText.startsWith('```markdown')) {
+            cleanText = cleanText.replace(/^```markdown\s*/i, '').replace(/```$/i, '').trim();
+          } else if (cleanText.startsWith('```')) {
+            cleanText = cleanText.replace(/^```\s*/, '').replace(/```$/, '').trim();
+          }
+
+          return cleanText;
+        } catch (err: any) {
+          lastError = err;
+          const msg = err.message || '';
+
+          if (msg.includes('PerDay') || (msg.includes('PerProjectPerModel') && msg.includes('Day'))) {
+            console.log(`      ⚡ Model ${model} đã hết quota ngày, chuyển model khác...`);
+            break;
+          }
+
+          const isRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
+          const isOverloaded = msg.includes('503') || msg.includes('high demand') || msg.includes('UNAVAILABLE');
+
+          if (isRateLimit && attempt < 3) {
+            let waitSeconds = 20;
+            const match = msg.match(/retry in ([0-9.]+)s/i) || msg.match(/"retryDelay":\s*"([0-9]+)s"/i);
+            if (match && match[1]) {
+              waitSeconds = Math.ceil(parseFloat(match[1])) + 2;
+            }
+            console.log(`      ⏳ Chạm giới hạn theo phút (RPM), chờ ${waitSeconds}s trước khi thử lại...`);
+            await new Promise((r) => setTimeout(r, waitSeconds * 1000));
+            continue;
+          }
+
+          if (isOverloaded && attempt < 2) {
+            console.log(`      ⚠️ Model ${model} bận (thử lại sau 3s)...`);
+            await new Promise((r) => setTimeout(r, 3000));
+            continue;
+          }
+
+          break;
+        }
+      }
+    }
+
+    throw new Error(`Lỗi cấu trúc hóa PDF: ${lastError?.message || 'Không rõ nguyên nhân'}`);
+  }
 }
+

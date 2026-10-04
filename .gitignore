@@ -1,9 +1,13 @@
 node_modules/
 dist/
+bin/
+scratch/
 .env
 *.epub
 input/*.epub
 output/*.epub
+input/*.pdf
+output/*.pdf
 !input/.gitkeep
 !output/.gitkeep
 .DS_Store
