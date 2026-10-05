@@ -12,6 +12,8 @@
     "inspect": "tsx src/cli/inspect.ts",
     "footnote": "tsx src/cli/footnote.ts",
     "pdf": "tsx src/cli/pdf.ts",
+    "bilingual": "tsx src/cli/bilingual.ts",
+    "translate": "tsx src/cli/bilingual.ts",
     "build": "tsc"
   },
   "keywords": [

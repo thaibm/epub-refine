@@ -135,6 +135,26 @@ export class OpfManager {
   }
 
   /**
+   * Thêm một itemref vào cuối spine (hỗ trợ thuộc tính linear)
+   */
+  addSpineItem(idref: string, linear?: string): void {
+    const existing = this.$(`spine > itemref[idref="${idref}"]`);
+    if (existing.length > 0) {
+      if (linear !== undefined) {
+        existing.attr('linear', linear);
+      }
+      return;
+    }
+
+    let tag = `<itemref idref="${idref}"`;
+    if (linear !== undefined) {
+      tag += ` linear="${linear}"`;
+    }
+    tag += '/>';
+    this.$('spine').append(tag);
+  }
+
+  /**
    * Chèn một itemref vào spine ngay sau một itemref mục tiêu
    */
   addSpineItemAfter(targetIdref: string, newIdref: string): void {
@@ -192,6 +212,30 @@ export class OpfManager {
       }
     });
     return foundId;
+  }
+
+  /**
+   * Cập nhật ngôn ngữ trong metadata dc:language
+   */
+  setLanguage(lang: string): void {
+    const langEl = this.$('dc\\:language, language').first();
+    if (langEl.length > 0) {
+      langEl.text(lang);
+    } else {
+      this.$('metadata').append(`<dc:language>${lang}</dc:language>`);
+    }
+  }
+
+  /**
+   * Cập nhật tiêu đề sách trong metadata dc:title
+   */
+  setTitle(title: string): void {
+    const titleEl = this.$('dc\\:title, title').first();
+    if (titleEl.length > 0) {
+      titleEl.text(title);
+    } else {
+      this.$('metadata').append(`<dc:title>${title}</dc:title>`);
+    }
   }
 
   /**

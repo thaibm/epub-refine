@@ -2,6 +2,7 @@
 
 Công cụ tự động hoá chỉnh sửa và nâng cấp toàn diện file sách EPUB bằng **Google Gemini AI** và **Node.js/TypeScript**:
 
+- 🌐 **Dịch Sách & Xuất Bản Ebook Song Ngữ (Bilingual Ebook with EPUB 3 Pop-up):** Dịch sách tiếng Anh sang tiếng Việt văn học tự nhiên, câu văn mượt mà. Toàn bộ văn bản tiếng Anh gốc được lưu trữ thông minh dưới dạng Pop-up Footnote với nhãn `[EN]`. Tích hợp bộ định hình bối cảnh cuốn sách (**Global Book Profiler**), từ điển thuật ngữ toàn cuốn tự động tích luỹ (**Dynamic Glossary**), và cửa sổ ngữ cảnh trượt (**Sliding Context Window**) để bảo toàn 100% tính đồng nhất thuật ngữ và phong cách xưng hô. Hỗ trợ **Checkpoint & Resume** tự động.
 - 📄 **Trích xuất PDF sang EPUB chuẩn (Tách riêng luồng):** Hỗ trợ cả sách quét (**Scan PDF** qua Apple Vision OCR native trên macOS) và văn bản số (**Docs PDF** qua PDF.js vector layer). Tự động lọc sạch running headers, running footers, số trang và reflow đoạn văn thông minh. **Tách riêng hoàn toàn khỏi luồng AI**: khi chạy PDF chỉ thuần túy trích xuất nội dung gốc vào workspace và tạo Git commit ban đầu, chưa sửa chính tả hay chèn heading để bạn toàn quyền kiểm soát.
 - 📑 **Tự động Gộp Phần => Chương (Part Merger):** Với những sách có cấu trúc nhiều phần (Phần 1, Phần 2...) và bên trong gồm nhiều chương, hệ thống tự động gom các chương con vào file Phần tương ứng. Giúp giảm từ hàng trăm file xuống chỉ còn vài file (tiết kiệm **~96% số request Gemini API**, tránh hoàn toàn lỗi RPM rate limit), đồng thời giữ nguyên ngắt trang trang trọng và mục lục phân cấp chuẩn (`H1 Phần` ➔ `H2 Chương`).
 - 🏷️ **Chuẩn hoá H1:** Tự động phát hiện và sửa các thẻ tiêu đề chương bị gắn nhầm (ví dụ: `<h4>`, `<h3>` hoặc `<p class="...">` do Calibre convert), xử lý gộp tiêu đề phân mảnh và xoá thẻ lặp lại.
@@ -46,6 +47,21 @@ pnpm run pack
 ```
 
 *(Hoặc nếu muốn xử lý xong tự động đóng gói luôn ra file EPUB, chỉ cần thêm cờ `--pack`: `pnpm start --pack`)*
+
+### 🆎 Luồng 3: Dịch & Làm sách Song Ngữ Anh - Việt (`.epub` English ➔ Bilingual `.epub`)
+Dành cho sách tiếng Anh cần chuyển ngữ sang tiếng Việt song ngữ:
+```bash
+# 1. Chạy dịch song ngữ tương tác (hỗ trợ chọn sách trong input/, tự động phân tích context & glossary)
+pnpm run bilingual
+
+# Hoặc nếu muốn sau khi dịch xong tự động đóng gói luôn ra file EPUB trong output/:
+pnpm run bilingual --pack
+
+# Các tuỳ chọn nâng cao:
+# - Thay đổi kích thước batch (mặc định 15 đoạn): --batch-size 20
+# - Đổi model: --model gemini-3.5-flash
+# - Dịch lại từ đầu, bỏ qua checkpoint: --fresh
+```
 
 ---
 

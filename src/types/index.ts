@@ -57,3 +57,36 @@ export interface AiChapterAnalysisResult {
   headings: HeadingSuggestion[];
   spellingFixes: SpellingFix[];
 }
+
+export interface BookContext {
+  bookTitle: string;
+  originalTitle: string;
+  genre?: string;
+  domain?: string;
+  tone?: string;
+  pronouns?: {
+    author?: string;
+    reader?: string;
+    notes?: string;
+  };
+  summary?: string;
+}
+
+export interface GlossaryData {
+  terms: Record<string, string>;
+  doNotTranslate: string[];
+}
+
+export interface BilingualParagraphItem {
+  idx: number;
+  originalEn: string;
+  translatedVi: string;
+}
+
+export interface BilingualChapterResult {
+  h1Vi?: string;
+  translatedParagraphs: { idx: number; text: string }[];
+  authorFootnotes?: { num: string; textVi: string }[];
+  newTerms?: Record<string, string>;
+  chapterSummary?: string;
+}
