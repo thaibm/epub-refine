@@ -3,7 +3,7 @@ import * as cheerio from 'cheerio';
 import type { UnpackedEpub } from './epubArchive.js';
 import type { OpfManager } from './opfManager.js';
 
-export const CHAPTER_REGEX = /^\s*(chương|hồi|tiết|phần|quyển|bài|tập|mục|đoạn|kỳ|chapter)\s+([0-9ivxlcdm]+|\w+)/i;
+export const CHAPTER_REGEX = /^\s*(chương|hồi|tiết|phần|quyển|tập|chapter|part|book)\s+([0-9]+|[ivxlcdm]+|thứ\s+\w+|một|hai|ba|bốn|năm|sáu|bảy|tám|chín|mười|nhất|nhì|tam|tứ|ngũ|lục|thất|bát|cửu|thập)\b/i;
 
 export interface ChapterBoundary {
   elementIndex: number;
@@ -102,10 +102,12 @@ export function detectChapterBoundaries(
     const anchorId = directId || childId;
 
     const isHeadingTag = $el.is('h1, h2, h3, h4, h5, h6');
+    const isH1 = $el.is('h1');
+    const isExplicitHeadingClass = /\b(title|heading|chapter|part)\b/i.test($el.attr('class') || '');
     const matchesChapterRegex = CHAPTER_REGEX.test(text);
 
-    // Tiêu chí 1: Heading hoặc đoạn ngắn khớp rõ ràng với "Chương X", "Chapter X"
-    if (matchesChapterRegex && (isHeadingTag || text.length < 80)) {
+    // Tiêu chí 1: Thẻ heading rõ ràng hoặc class heading khớp với "Chương X", "Chapter X"
+    if (matchesChapterRegex && (isHeadingTag || isExplicitHeadingClass)) {
       rawBoundaries.push({
         elementIndex: idx,
         title: text.slice(0, 80),
@@ -114,8 +116,8 @@ export function detectChapterBoundaries(
       return;
     }
 
-    // Tiêu chí 2: Có anchor ID trùng với anchor đã biết trong toc.ncx và khớp regex chương
-    if (anchorId && knownAnchorIds.includes(anchorId) && (matchesChapterRegex || isHeadingTag)) {
+    // Tiêu chí 2: Có anchor ID trùng với anchor cấp cao (top-level) trong toc.ncx VÀ (khớp regex chương hoặc là H1/H2)
+    if (anchorId && knownAnchorIds.includes(anchorId) && (matchesChapterRegex || isH1 || $el.is('h2'))) {
       rawBoundaries.push({
         elementIndex: idx,
         title: text.slice(0, 80),
@@ -170,9 +172,11 @@ export function splitMultiChapterFiles(
       try {
         const ncxXml = unpacked.getFileString(ncxZipPath);
         const $ncx = cheerio.load(ncxXml, { xmlMode: true });
-        $ncx('navPoint').each((_, np) => {
-          const src = $ncx(np).find('content').attr('src');
-          const label = $ncx(np).find('navLabel > text').text().trim();
+        // Chỉ lấy các navPoint cấp cao nhất (con trực tiếp của navMap), tuyệt đối không lấy navPoint lồng nhau (tiểu mục H2/H3)
+        $ncx('navMap > navPoint').each((_, np) => {
+          const $np = $ncx(np);
+          const src = $np.find('> content').attr('src') || $np.children('content').attr('src');
+          const label = $np.find('> navLabel > text').text().trim() || $np.children('navLabel').children('text').text().trim();
           if (src) {
             const [filePart, hashPart] = src.split('#');
             if (filePart) {
@@ -205,6 +209,9 @@ export function splitMultiChapterFiles(
     const lowerHref = ch.relativeHref.toLowerCase();
     if (lowerHref.includes('titlepage') || lowerHref.includes('cover')) continue;
 
+    // Không bao giờ tách các file đã được phân tách thành part trước đó để tránh vòng lặp tách vô hạn
+    if (/_part\d+\./i.test(ch.relativeHref)) continue;
+
     const html = unpacked.getFileString(ch.zipPath);
 
     // Bỏ qua trang mục lục
@@ -213,6 +220,13 @@ export function splitMultiChapterFiles(
     }
 
     const knownAnchors = knownAnchorsByFile.get(ch.relativeHref) || [];
+
+    // Nếu sách đã có cấu trúc nhiều file (>= 3 file trong spine)
+    // thì tuyệt đối không tự động tách một file riêng lẻ trừ khi toc.ncx chỉ định rõ có >= 2 anchor cấp cao trong file đó
+    if (spineChapterFiles.length >= 3 && knownAnchors.length < 2) {
+      continue;
+    }
+
     const { containerSelector, boundaries } = detectChapterBoundaries(html, ch.relativeHref, knownAnchors);
 
     // Nếu chỉ có 0 hoặc 1 chương thì không cần tách file

@@ -95,6 +95,9 @@ export function resolveEpubFromQuery(query: string, epubs: EpubFileInfo[]): Epub
   // 2. Kiểm tra nếu là đường dẫn file tồn tại trực tiếp trên hệ thống
   const directPath = path.resolve(trimmed);
   if (fs.existsSync(directPath) && fs.statSync(directPath).isFile()) {
+    if (directPath.toLowerCase().endsWith('.pdf')) {
+      return undefined;
+    }
     const fileName = path.basename(directPath);
     const stats = fs.statSync(directPath);
     const existing = epubs.find((e) => path.resolve(e.fullPath) === directPath);
@@ -113,6 +116,9 @@ export function resolveEpubFromQuery(query: string, epubs: EpubFileInfo[]): Epub
   const inputDir = path.resolve('input');
   const pathInInput = path.join(inputDir, trimmed);
   if (fs.existsSync(pathInInput) && fs.statSync(pathInInput).isFile()) {
+    if (pathInInput.toLowerCase().endsWith('.pdf')) {
+      return undefined;
+    }
     const inInput = epubs.find((e) => path.resolve(e.fullPath) === pathInInput);
     if (inInput) return inInput;
   }
@@ -173,6 +179,22 @@ export async function selectOrResolveEpub(
 
   // 1. Trường hợp người dùng có truyền tham số query
   if (query && query.trim()) {
+    const trimmed = query.trim();
+    const isDirectPdf =
+      trimmed.toLowerCase().endsWith('.pdf') ||
+      (fs.existsSync(trimmed) && trimmed.toLowerCase().endsWith('.pdf')) ||
+      (fs.existsSync(path.join(inputDir, trimmed)) && trimmed.toLowerCase().endsWith('.pdf'));
+
+    if (isDirectPdf) {
+      console.error(`\n❌ Lỗi: "${trimmed}" là tài liệu định dạng PDF, không phải sách EPUB.`);
+      console.error(`👉 Quy trình xử lý PDF đã được tách riêng khỏi pnpm start:`);
+      console.error(`   Bước 1: Trích xuất nội dung thuần túy từ PDF sang workspace:`);
+      console.error(`      pnpm run pdf -i "${trimmed}"`);
+      console.error(`   Bước 2: Dùng AI biên tập heading, chính tả, footnote & TOC:`);
+      console.error(`      pnpm start --no-pack\n`);
+      process.exit(1);
+    }
+
     const matched = resolveEpubFromQuery(query, epubs);
     if (matched) {
       return matched;
@@ -190,8 +212,17 @@ export async function selectOrResolveEpub(
 
   // 2. Trường hợp không truyền query
   if (epubs.length === 0) {
+    const pdfs = fs.existsSync(inputDir)
+      ? fs.readdirSync(inputDir).filter((f) => f.endsWith('.pdf'))
+      : [];
     console.error(`\n❌ Lỗi: Không tìm thấy file .epub nào trong thư mục "${inputDir}/"`);
-    console.error(`👉 Hãy copy file sách (.epub) vào thư mục: ./${inputDir}/\n`);
+    if (pdfs.length > 0) {
+      console.error(`💡 Tìm thấy ${pdfs.length} file PDF trong "${inputDir}/": ${pdfs.join(', ')}`);
+      console.error(`👉 Để trích xuất nội dung PDF vào workspace, hãy chạy:`);
+      console.error(`   pnpm run pdf\n`);
+    } else {
+      console.error(`👉 Hãy copy file sách (.epub hoặc .pdf) vào thư mục: ./${inputDir}/\n`);
+    }
     process.exit(1);
   }
 

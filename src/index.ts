@@ -35,7 +35,8 @@ program
   .option('--renumber-footnotes [style]', 'Đánh số lại thứ tự chú thích toàn sách ("bracket", "star", "number")')
   .option('--dry-run', 'Chỉ chạy phân tích và in kết quả, không ghi đè file', false)
   .option('--fresh', 'Bắt buộc giải nén lại từ file EPUB gốc (ghi đè workspace)', false)
-  .option('--no-merge-parts', 'Không gộp các chương theo từng phần (giữ nguyên từng file riêng lẻ)')
+  .option('--split', 'Tự động tách các file chứa nhiều chương thành các file độc lập (mặc định: tắt)', false)
+  .option('--merge-parts', 'Gộp các chương theo từng phần (Phần => Chương) vào 1 file (mặc định: tắt)', false)
   .option('--pack', 'Tự động đóng gói file EPUB sau khi xử lý xong (mặc định: tắt, giữ workspace để duyệt Git diff)')
   .option('--no-pack', 'Không đóng gói file EPUB (mặc định)')
   .option('--pack-only', 'Chỉ đóng gói thư mục workspace thành file EPUB (sau khi đã duyệt)', false)
@@ -195,16 +196,18 @@ async function main() {
   console.log(`   - Tựa sách: "${pkg.metadata.title}"`);
   console.log(`   - Tác giả: ${pkg.metadata.creator || 'Chưa rõ'}`);
 
-  // Tự động phân tách các file XHTML chứa nhiều chương thành các file độc lập
-  const splitResult = splitMultiChapterFiles(unpacked, opfManager);
-  if (splitResult.splitFilesCount > 0) {
-    // Reload lại OPF manager sau khi đã bổ sung các file mới vào manifest và spine
-    opfManager = new OpfManager(unpacked, opfPath);
-    pkg = opfManager.getPackageInfo();
+  // Tự động phân tách các file XHTML chứa nhiều chương thành các file độc lập (chỉ khi có cờ --split)
+  if (options.split) {
+    const splitResult = splitMultiChapterFiles(unpacked, opfManager);
+    if (splitResult.splitFilesCount > 0) {
+      // Reload lại OPF manager sau khi đã bổ sung các file mới vào manifest và spine
+      opfManager = new OpfManager(unpacked, opfPath);
+      pkg = opfManager.getPackageInfo();
+    }
   }
 
-  // Tự động gộp các chương trong cùng một phần (Phần => Chương) vào 1 file duy nhất để tiết kiệm gọi Gemini API
-  if (options.mergeParts !== false) {
+  // Tự động gộp các chương trong cùng một phần (Phần => Chương) vào 1 file duy nhất (chỉ khi có cờ --merge-parts)
+  if (options.mergeParts) {
     const mergeResult = mergePartChapters(unpacked, opfManager);
     if (mergeResult.mergedPartsCount > 0) {
       opfManager = new OpfManager(unpacked, opfPath);
@@ -425,9 +428,26 @@ async function main() {
   // 7. Xây dựng lại Table of Contents (TOC)
   console.log(`\n[4/5] Đang tái tạo Table of Contents (Mục lục đa cấp)...`);
   
-  // Thu thập toàn bộ headings từ tất cả các chương nội dung trong sách (đảm bảo không bị thiếu chương)
+  // Thu thập toàn bộ headings từ tất cả các file nội dung trong sách (đảm bảo không bị thiếu chương hay trang mục lục/nội dung)
   const fullBookHeadings: HeadingItem[] = [];
-  for (const ch of contentChapters) {
+  const tocCandidateFiles = allFiles.filter((ch) => {
+    const name = ch.relativeHref.toLowerCase();
+    if (name.includes('titlepage') || name.includes('cover')) return false;
+    if (name === 'nav.xhtml' || name.endsWith('/nav.xhtml')) return false;
+
+    try {
+      const html = unpacked.getFileString(ch.zipPath);
+      if (FootnoteProcessor.isFootnoteFile(html, ch.relativeHref)) return false;
+      const hasImg = html.includes('<img') || html.includes('<image');
+      const hasText = html.includes('<p') || html.includes('<div') || html.includes('<h1');
+      if (hasImg && !hasText) return false;
+      return true;
+    } catch {
+      return true;
+    }
+  });
+
+  for (const ch of tocCandidateFiles) {
     if (!unpacked.hasFile(ch.zipPath)) continue;
     const html = unpacked.getFileString(ch.zipPath);
     const proc = new ChapterDomProcessor(html, ch.relativeHref);

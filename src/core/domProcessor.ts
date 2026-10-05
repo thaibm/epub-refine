@@ -30,6 +30,69 @@ export class ChapterDomProcessor {
 
     // Tự động phân tách các thẻ <p> chứa nhiều thẻ <br/> (do Calibre gộp đoạn văn) thành các đoạn văn riêng
     this.unpackParagraphs();
+
+    // Tự động nối các đoạn văn bị ngắt vụn (hard-wrapped theo dòng in PDF/ảnh)
+    this.reflowBrokenParagraphs();
+  }
+
+  /**
+   * Tự động nối các thẻ <p> bị ngắt vụn (hard-wrapped do layout trang in PDF/ảnh)
+   * Chỉ những thẻ <p> kết thúc bằng dấu câu (. ! ? : …) mới thực sự là ngắt đoạn.
+   * Nếu thẻ <p> trước kết thúc bằng chữ thường hoặc không có dấu câu, tự động nối với thẻ <p> sau.
+   */
+  reflowBrokenParagraphs(): number {
+    const container = this.getContentContainer();
+    const pList = container.find('p').toArray();
+    let mergedCount = 0;
+
+    for (let i = 0; i < pList.length; i++) {
+      const el = pList[i];
+      if (!el.parent) continue; // Đã bị xoá do gộp vào thẻ trước
+
+      const $p = this.$(el);
+      let text = $p.text().replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+
+      let nextNode = $p.next();
+      while (nextNode.length > 0 && nextNode[0].tagName && nextNode[0].tagName.toLowerCase() === 'p') {
+        const $nextP = nextNode;
+        const nextText = $nextP.text().replace(/\s+/g, ' ').trim();
+        if (!nextText) {
+          nextNode = nextNode.next();
+          continue;
+        }
+
+        const endsWithSentencePunct = /[.!?:…"”»)]\s*$/.test(text);
+        const isAbbreviation = /(?:v\.v|nxb|gs|ts|ths|bs|tp|vn|đh|th|tt|trg|tr)\.\s*$/i.test(text) || /\b[A-ZÀ-Ỹ]\.\s*$/.test(text);
+        const nextStartsWithLower = /^[a-zà-ỹ]/.test(nextText);
+        const endsWithHyphen = /[-–]\s*$/.test(text);
+
+        const shouldMerge = endsWithHyphen || nextStartsWithLower || !endsWithSentencePunct || isAbbreviation;
+
+        if (!shouldMerge) {
+          break;
+        }
+
+        let curHtml = $p.html() || '';
+        let nextHtml = $nextP.html() || '';
+
+        if (endsWithHyphen) {
+          curHtml = curHtml.replace(/[-–]\s*$/g, '');
+          $p.html(`${curHtml}${nextHtml}`);
+        } else {
+          $p.html(`${curHtml} ${nextHtml}`);
+        }
+
+        text = $p.text().replace(/\s+/g, ' ').trim();
+
+        const toRemove = nextNode;
+        nextNode = nextNode.next();
+        toRemove.remove();
+        mergedCount++;
+      }
+    }
+
+    return mergedCount;
   }
 
   /**

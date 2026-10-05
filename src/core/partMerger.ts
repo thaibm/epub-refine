@@ -70,9 +70,20 @@ function detectPartInElement($el: cheerio.Cheerio<any>): {
   partTitle?: string;
   chapterTitle?: string;
 } {
+  const isHeading = $el.is('h1, h2, h3, h4, h5, h6') || /\b(title|heading|part)\b/i.test($el.attr('class') || '');
   const text = $el.text().replace(/\s+/g, ' ').trim();
   if (!text || text.length > 80) {
     return { isPart: false };
+  }
+
+  // Nếu không phải là thẻ heading và không có class tiêu đề:
+  // Chỉ chấp nhận nếu thẻ rất ngắn (< 40 ký tự), không kết thúc bằng dấu chấm câu, và có dạng in đậm
+  if (!isHeading) {
+    const isBold = $el.find('b, strong').length > 0 || $el.is('b, strong');
+    const endsWithPeriod = /[.!?]$/.test(text);
+    if (!isBold || endsWithPeriod || text.length > 40) {
+      return { isPart: false };
+    }
   }
 
   // 1. Kiểm tra tiêu đề kết hợp: "Phần 3 - Chương 1"

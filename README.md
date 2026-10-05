@@ -2,6 +2,7 @@
 
 Công cụ tự động hoá chỉnh sửa và nâng cấp toàn diện file sách EPUB bằng **Google Gemini AI** và **Node.js/TypeScript**:
 
+- 📄 **Trích xuất PDF sang EPUB chuẩn (Tách riêng luồng):** Hỗ trợ cả sách quét (**Scan PDF** qua Apple Vision OCR native trên macOS) và văn bản số (**Docs PDF** qua PDF.js vector layer). Tự động lọc sạch running headers, running footers, số trang và reflow đoạn văn thông minh. **Tách riêng hoàn toàn khỏi luồng AI**: khi chạy PDF chỉ thuần túy trích xuất nội dung gốc vào workspace và tạo Git commit ban đầu, chưa sửa chính tả hay chèn heading để bạn toàn quyền kiểm soát.
 - 📑 **Tự động Gộp Phần => Chương (Part Merger):** Với những sách có cấu trúc nhiều phần (Phần 1, Phần 2...) và bên trong gồm nhiều chương, hệ thống tự động gom các chương con vào file Phần tương ứng. Giúp giảm từ hàng trăm file xuống chỉ còn vài file (tiết kiệm **~96% số request Gemini API**, tránh hoàn toàn lỗi RPM rate limit), đồng thời giữ nguyên ngắt trang trang trọng và mục lục phân cấp chuẩn (`H1 Phần` ➔ `H2 Chương`).
 - 🏷️ **Chuẩn hoá H1:** Tự động phát hiện và sửa các thẻ tiêu đề chương bị gắn nhầm (ví dụ: `<h4>`, `<h3>` hoặc `<p class="...">` do Calibre convert), xử lý gộp tiêu đề phân mảnh và xoá thẻ lặp lại.
 - 🌳 **Bổ sung Heading 2 & Heading 3:** AI đọc ngữ cảnh từng chương để nhận diện hoặc chèn các phân mục `<h2>` và `<h3>` logic.
@@ -15,8 +16,23 @@ Công cụ tự động hoá chỉnh sửa và nâng cấp toàn diện file sá
 
 ## ⚡ Hướng dẫn nhanh (TL;DR)
 
-Chỉ với 3 bước đơn giản:
+Hệ thống hỗ trợ 2 luồng xử lý riêng biệt:
 
+### 🅰️ Luồng 1: Xử lý từ sách PDF (`.pdf` ➔ `.epub`)
+Quy trình được **tách riêng làm 2 giai đoạn** để đảm bảo tính minh bạch:
+```bash
+# 1. Trích xuất nội dung thuần túy từ PDF vào workspace (cực nhanh, không tốn quota AI)
+pnpm run pdf
+
+# 2. Dùng AI biên tập chuyên sâu (chuẩn hoá H1, chèn H2/H3, sửa chính tả, chú thích & TOC)
+pnpm start --no-pack
+
+# 3. Xem chi tiết các điểm AI đã sửa so với bản gốc PDF và đóng gói thành phẩm
+git -C workspace diff
+pnpm run pack
+```
+
+### 🅱️ Luồng 2: Xử lý từ file EPUB có sẵn (`.epub` ➔ `.epub`)
 ```bash
 # 1. Giải nén sách vào workspace để xử lý
 pnpm run unpack
@@ -55,7 +71,7 @@ pnpm run pack
 
 ```text
 edit-epub/
-├── input/                    # 👉 Nơi đặt các file EPUB đầu vào
+├── input/                    # 👉 Nơi đặt các file sách đầu vào (.epub hoặc .pdf)
 ├── output/                   # 🚀 Nơi xuất các file EPUB hoàn thiện sau khi pack
 ├── workspace/                # 📂 Thư mục làm việc giải nén (có Git tracking riêng để xem diff)
 ├── src/                      # Mã nguồn công cụ
@@ -67,23 +83,35 @@ edit-epub/
 
 ## Quy trình làm việc chuẩn (Khuyến nghị với Git Diff Review)
 
-Sơ đồ tổng quan quy trình từng bước:
+Sơ đồ tổng quan quy trình 2 luồng đầu vào:
 
 ```text
-[input/*.epub] 
-       │
-       ▼ (Bước 1: pnpm run unpack)
- [./workspace/]  <── Tự động tạo Git commit gốc ban đầu
-       │
-       ▼ (Bước 2: pnpm start) [Mặc định KHÔNG đóng gói để kiểm tra Git diff]
- [AI Xử lý]      <── Tự gộp Phần->Chương + Chuẩn hoá H1/H2/H3 + Sửa chính tả + Pop-up Chú thích + TOC
-       │             (Call Gemini API cùng nhau trong 1 lượt, tiết kiệm tối đa quota)
-       │
-       ▼ (Bước 3: git -C workspace diff)
- [Duyệt Git Diff] <── Xem trực quan 2 cột trên VS Code, sửa tay nếu cần
-       │
-       ▼ (Bước 4: pnpm run pack)
-[output/*_edited.epub] <── Đóng gói chuẩn IDPF hoàn thiện
+  [input/*.pdf]                          [input/*.epub]
+        │                                      │
+        ▼ (pnpm run pdf)                       ▼ (pnpm run unpack)
+┌────────────────────────────────────────────────────────┐
+│                      ./workspace/                      │
+│        <── Tự động tạo Git commit gốc ban đầu ──>      │
+└──────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼ (pnpm start --no-pack)
+┌────────────────────────────────────────────────────────┐
+│                   AI Xử Lý Toàn Diện                   │
+│  - Chuẩn hoá H1                                        │
+│  - Bổ sung H2, H3 theo ngữ cảnh                       │
+│  - Sửa lỗi chính tả & lỗi OCR                         │
+│  - Chuyển đổi Pop-up Chú thích EPUB 3                  │
+│  - Tái tạo Mục lục (TOC) đa cấp NCX & NAV             │
+└──────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼ (git -C workspace diff)
+┌────────────────────────────────────────────────────────┐
+│                    Duyệt Git Diff                      │
+│   <── So sánh 2 cột trực quan: Bản gốc vs Bản sửa ──> │
+└──────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼ (pnpm run pack)
+                 [output/*_edited.epub]
 ```
 
 ---
@@ -131,8 +159,11 @@ pnpm start --limit 2
 # Cách 4: Bắt đầu từ chương thứ N
 pnpm start --start 5 --limit 3
 
-# Cách 5: Giữ nguyên từng file chương riêng lẻ (không gộp theo phần)
-pnpm start --no-merge-parts
+# Cách 5: Gộp các chương con theo từng phần (khi sách có Phần I gồm Chương 1, 2, 3...)
+pnpm start --merge-parts
+
+# Cách 6: Phân tách các file XHTML chứa nhiều chương nằm chung thành file độc lập
+pnpm start --split
 ```
 
 ---
@@ -206,6 +237,48 @@ Khi phát hiện sách có từ 2 Phần trở lên và mỗi phần gồm nhi�
 
 ---
 
+## 📄 Luồng Chuyển Đổi Sách PDF (`pnpm run pdf`)
+
+Khác với các công cụ thông thường gộp chung OCR và AI biên tập làm một, `edit-epub` **tách riêng hoàn toàn 2 luồng**:
+1. **Lệnh `pnpm run pdf`:** Chỉ làm một nhiệm vụ duy nhất là **thuần túy trích xuất nội dung nguyên bản** từ file PDF sang cấu trúc EPUB workspace.
+   - ⚡ **Không gọi Gemini AI:** Chạy cực nhanh, không tiêu tốn quota API.
+   - 🔒 **Bảo toàn 100% chữ nghĩa gốc:** Chưa sửa chính tả, chưa chèn heading H2/H3 phỏng đoán.
+   - 📸 **Hỗ trợ Scan PDF:** Kích hoạt Apple Vision OCR native trên macOS (ngôn ngữ `vi-VT`) với độ chính xác cao và tốc độ vượt trội.
+   - 📑 **Hỗ trợ Docs PDF:** Trích xuất text vector layer và toạ độ font qua PDF.js.
+   - 🧹 **Lọc rác trang thông minh:** Tự động phát hiện và loại bỏ running headers, running footers, và các định dạng số trang lặp lại ở đầu/chân trang.
+   - 🧩 **Smart Paragraph Reflow:** Tự động nối các từ bị đứt quãng bởi dấu gạch nối cuối dòng (`nông-` + `nghiệp` ➔ `nông nghiệp`), nối các dòng trong cùng một đoạn văn thành một khối `<p>` liền mạch và giữ ngắt đoạn tự nhiên khi hết câu.
+   - 🏷️ **Nhận diện tiêu đề chương tự nhiên (H1):** Thuật toán tự động phát hiện các dòng tiêu đề chương/phần (theo pattern *Chương*, *Phần*, *Tựa*, *Lời mở đầu*, số La Mã *I.*, *II.*...) để phân tách thành các file `part0001.xhtml`, `part0002.xhtml`... trong workspace.
+   - 🌱 **Git commit gốc:** Tự động khởi tạo commit đầu tiên trong workspace: `"Original PDF extracted content"`.
+2. **Lệnh `pnpm start --no-pack`:** Sau khi đã có workspace nội dung gốc, bạn mới chạy AI để biên tập chuyên sâu. Lúc này bạn có thể dùng `git -C workspace diff` để xem chi tiết từng dòng chữ AI đã sửa chữa so với bản gốc PDF.
+
+### Cách sử dụng lệnh `pnpm run pdf`:
+
+```bash
+# 1. Menu tương tác (tự động liệt kê các file PDF có sẵn trong input/ để chọn)
+pnpm run pdf
+
+# 2. Chọn nhanh theo số thứ tự (1-based)
+pnpm run pdf 1
+
+# 3. Tìm kiếm theo từ khoá hoặc tên file PDF (không cần gõ đuôi .pdf, không phân biệt hoa thường)
+pnpm run pdf "dich-kinh"
+pnpm run pdf -i "dich-kinh-linh-the"
+
+# 4. Kiểm thử nhanh N trang đầu tiên (ví dụ 10 trang)
+pnpm run pdf -i dich-kinh --limit 10
+
+# 5. Trích xuất khoảng trang cụ thể (từ trang 20 đến 50)
+pnpm run pdf -i dich-kinh --start 20 --limit 30
+
+# 6. Chỉ định ảnh bìa riêng (nếu bìa scan bị mờ hoặc muốn thay bìa mới)
+pnpm run pdf -i dich-kinh --cover "./scratch/bia_dep.jpg"
+
+# 7. Trích xuất xong tự động đóng gói luôn thành file EPUB thô
+pnpm run pdf -i dich-kinh --pack
+```
+
+---
+
 ## 🛠️ Các Tiện ích Độc lập (CLI Tools)
 
 Ngoài lệnh `pnpm start` chạy toàn diện, bạn có thể gọi riêng từng công cụ khi cần:
@@ -257,6 +330,8 @@ pnpm run pack
 
 ## 📋 Bảng tổng hợp các tùy chọn dòng lệnh (CLI Options)
 
+### 1. Tùy chọn cho lệnh biên tập AI (`pnpm start`)
+
 | Tham số | Mô tả | Mặc định |
 |---|---|---|
 | `-i, --input <query>` | Số thứ tự [1-N], tên file, từ khoá hoặc đường dẫn file trong `input/` | Tự động nhận diện hoặc hiển thị menu chọn |
@@ -275,4 +350,17 @@ pnpm run pack
 | `--dry-run` | Chạy thử nghiệm in log phân tích, không ghi file | `false` |
 | `--fresh` | Bắt buộc giải nén lại từ file EPUB gốc (ghi đè workspace) | `false` |
 | `--delay <ms>` | Thời gian nghỉ giữa các chương | `2000` (2 giây) |
+
+### 2. Tùy chọn cho lệnh trích xuất PDF (`pnpm run pdf`)
+
+| Tham số | Mô tả | Mặc định |
+|---|---|---|
+| `-i, --input <query>` | Số thứ tự [1-N], tên file hoặc từ khoá file PDF trong `input/` | Tự động nhận diện hoặc hiển thị menu chọn |
+| `-d, --dir <path>` | Thư mục workspace xuất bản | `./workspace` |
+| `-o, --output <path>` | Đường dẫn file EPUB thô xuất xưởng (nếu muốn đóng gói ngay) | `<tên_gốc>_raw.epub` trong `output/` |
+| `-c, --cover <path>` | Đường dẫn ảnh bìa ngoài (thay thế nếu bìa scan bị mờ) | Tự động trích xuất trang 1 của PDF |
+| `--start <number>` | Bắt đầu trích xuất từ trang thứ mấy (1-based) | `1` |
+| `--limit <number>` | Giới hạn số trang trích xuất (để kiểm thử nhanh) | Toàn bộ số trang |
+| `--pack` | Tự động đóng gói file EPUB thô sau khi hoàn thành workspace | `false` |
+
 
