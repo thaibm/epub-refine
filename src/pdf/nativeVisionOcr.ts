@@ -8,6 +8,7 @@ export interface VisionOcrOptions {
   startPage?: number;
   endPage?: number;
   extractCoverPath?: string;
+  extractImagesDir?: string;
   languages?: string[];
   dpi?: number;
   onProgress?: (current: number, total: number) => void;
@@ -66,6 +67,9 @@ export async function runVisionOcr(
   if (options.extractCoverPath) {
     args.push('--extract-cover', path.resolve(options.extractCoverPath));
   }
+  if (options.extractImagesDir) {
+    args.push('--extract-images', path.resolve(options.extractImagesDir));
+  }
   if (options.languages && options.languages.length > 0) {
     args.push('--langs', options.languages.join(','));
   }
@@ -81,8 +85,10 @@ export async function runVisionOcr(
   });
 
   const pages: PdfExtractedPage[] = [];
+  const pendingPageImages = new Map<number, any[]>();
   let totalDocPages = 0;
   let coverPath = options.extractCoverPath;
+  let backCoverPath: string | undefined;
 
   return new Promise((resolve, reject) => {
     let stderrOutput = '';
@@ -103,13 +109,37 @@ export async function runVisionOcr(
           }
         } else if (data.type === 'cover') {
           coverPath = data.path;
+        } else if (data.type === 'back_cover') {
+          backCoverPath = data.path;
+        } else if (data.type === 'page_image') {
+          const pageNum = data.pageNumber;
+          const imgItem = {
+            fileName: data.fileName,
+            pageNumber: pageNum,
+            width: data.width,
+            height: data.height,
+            isPhotoPlate: data.isPhotoPlate
+          };
+          const existing = pages.find((p) => p.pageNumber === pageNum);
+          if (existing) {
+            if (!existing.images) existing.images = [];
+            existing.images.push(imgItem);
+            existing.isPhotoPlate = data.isPhotoPlate;
+          } else {
+            const list = pendingPageImages.get(pageNum) || [];
+            list.push(imgItem);
+            pendingPageImages.set(pageNum, list);
+          }
         } else if (data.type === 'page') {
           const lines: PdfLineItem[] = data.lines || [];
           const rawText = lines.map((l: PdfLineItem) => l.text).join('\n');
+          const pageImages = pendingPageImages.get(data.pageNumber) || [];
           pages.push({
             pageNumber: data.pageNumber,
             lines,
-            rawText
+            rawText,
+            images: pageImages.length > 0 ? pageImages : undefined,
+            isPhotoPlate: pageImages.some((im) => im.isPhotoPlate)
           });
         } else if (data.type === 'error') {
           console.error(`❌ Vision OCR Error: ${data.message}`);
@@ -119,9 +149,10 @@ export async function runVisionOcr(
       }
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (code !== 0) {
-        return reject(new Error(`Vision OCR tiến trình dừng với mã lỗi ${code}: ${stderrOutput}`));
+        const exitInfo = signal ? `tín hiệu ${signal}` : `mã lỗi ${code}`;
+        return reject(new Error(`Vision OCR tiến trình dừng với ${exitInfo}: ${stderrOutput}`));
       }
 
       // Sắp xếp các trang theo thứ tự tăng dần
@@ -134,6 +165,8 @@ export async function runVisionOcr(
         totalPages: totalDocPages || pages.length,
         pages,
         coverImagePath: coverPath,
+        backCoverImagePath: backCoverPath,
+        extractedImagesDir: options.extractImagesDir,
         sourcePdfPath: absPdfPath,
         fileName,
         baseName,

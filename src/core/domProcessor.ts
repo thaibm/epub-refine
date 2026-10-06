@@ -67,6 +67,15 @@ export class ChapterDomProcessor {
         const nextStartsWithLower = /^[a-zà-ỹ]/.test(nextText);
         const endsWithHyphen = /[-–]\s*$/.test(text);
 
+        const isCurHeading = (!/\p{Ll}/u.test(text) && /\p{Lu}/u.test(text) && text.length < 80) ||
+                             /^\s*(?:chương|phần|tiết|mục|hồi)\b/iu.test(text);
+        const isNextHeading = (!/\p{Ll}/u.test(nextText) && /\p{Lu}/u.test(nextText) && nextText.length < 80) ||
+                              /^\s*(?:chương|phần|tiết|mục|hồi)\b/iu.test(nextText);
+
+        if (isCurHeading || isNextHeading) {
+          break;
+        }
+
         const shouldMerge = endsWithHyphen || nextStartsWithLower || !endsWithSentencePunct || isAbbreviation;
 
         if (!shouldMerge) {
@@ -334,12 +343,19 @@ export class ChapterDomProcessor {
   applyHeadings(headings: HeadingSuggestion[]): void {
     // Sắp xếp ngược từ dưới lên trên để không làm lệch vị trí chèn
     const sorted = [...headings].sort((a, b) => b.insertBeforeIdx - a.insertBeforeIdx);
+    const hasExistingH2 = this.$('h2').length > 0;
 
     for (const h of sorted) {
       const targetP = this.$(`body p[data-pid="${h.insertBeforeIdx}"]`);
       if (targetP.length === 0) continue;
 
-      const tag = h.tag.toLowerCase() === 'h3' ? 'h3' : 'h2';
+      let tag = h.tag.toLowerCase() === 'h3' ? 'h3' : 'h2';
+      // Nếu chương đã có sẵn các thẻ H2 (chuẩn hoá theo Mục lục xuất bản),
+      // thì mọi heading AI đề xuất bên trong bắt buộc phải là H3 để không làm vỡ cấu trúc TOC!
+      if (hasExistingH2 && tag === 'h2') {
+        tag = 'h3';
+      }
+
       const cleanTitle = h.title.trim();
       const pText = targetP.text().trim();
 

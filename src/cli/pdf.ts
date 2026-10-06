@@ -6,6 +6,7 @@ import { selectOrResolvePdf } from '../pdf/pdfSelector.js';
 import { classifyPdf } from '../pdf/classifier.js';
 import { runVisionOcr } from '../pdf/nativeVisionOcr.js';
 import { parseDigitalPdf } from '../pdf/digitalPdfParser.js';
+import { detectAndParsePdfToc } from '../pdf/tocParser.js';
 import { removeHeadersAndFooters, convertPagesToCleanHtml } from '../pdf/layoutReflow.js';
 import { splitHtmlIntoChapters, buildEpubWorkspace } from '../pdf/pdfToWorkspace.js';
 import { packEpubFromDir } from '../core/epubArchive.js';
@@ -58,12 +59,14 @@ async function main() {
   }
   console.log(`📌 Phạm vi xử lý: Trang ${startPage} -> Trang ${endPage} (${endPage - startPage + 1} trang)`);
 
-  // Chuẩn bị đường dẫn ảnh bìa
+  // Chuẩn bị đường dẫn ảnh bìa và thư mục ảnh trích xuất
   const scratchDir = path.resolve('scratch');
   if (!fs.existsSync(scratchDir)) fs.mkdirSync(scratchDir, { recursive: true });
   const coverTempPath = options.cover
     ? path.resolve(options.cover)
     : path.join(scratchDir, `cover_${selectedPdf.baseName}.jpg`);
+  const imagesTempDir = path.join(scratchDir, `extracted_images_${selectedPdf.baseName}`);
+  if (!fs.existsSync(imagesTempDir)) fs.mkdirSync(imagesTempDir, { recursive: true });
 
   // 2. Trích xuất Text & Hình ảnh
   let extraction: PdfExtractionResult;
@@ -75,6 +78,7 @@ async function main() {
       startPage,
       endPage,
       extractCoverPath: options.cover ? undefined : coverTempPath,
+      extractImagesDir: imagesTempDir,
       onProgress(current, total) {
         const percent = Math.round((current / total) * 100);
         if (percent >= lastProgress + 10 || current === total) {
@@ -102,16 +106,30 @@ async function main() {
     console.log(`\n   ✅ Đã hoàn tất trích xuất text cho ${extraction.pages.length} trang.`);
   }
 
-  // 3. Layout Reflow & Lọc Header/Footer/Số trang
-  console.log(`\n🧹 [3/4] Đang lọc bỏ running headers, running footers, số trang và reflow đoạn văn...`);
-  const cleanedPages = removeHeadersAndFooters(extraction.pages);
-
   const bookTitle = selectedPdf.baseName
     .replace(/[-_.]+/g, ' ')
     .replace(/\b\w/g, (c) => c.toUpperCase());
 
-  // Cấu trúc hoá văn bản thuần túy (không qua AI, bảo toàn nguyên bản 100%)
-  const fullStructuredHtml = convertPagesToCleanHtml(cleanedPages, bookTitle);
+  // 2.5. Nhận diện Mục Lục (TOC Anchor Engine)
+  console.log(`\n📑 [2.5/4] Đang quét tìm và phân tích cấu trúc Mục lục trong tài liệu PDF...`);
+  const toc = detectAndParsePdfToc(extraction.pages);
+  if (toc.hasToc) {
+    console.log(`   ✅ Đã nhận diện Mục lục (trang ${toc.tocPageNumbers.join(', ')}):`);
+    console.log(`      + ${toc.majorChapters.length} Chương chính (H1)`);
+    console.log(`      + ${toc.subSections.length} Tiểu mục (H2)`);
+  } else {
+    console.log(`   ℹ️ Không tìm thấy trang Mục lục riêng biệt, áp dụng thuật toán phân tách cấu trúc tự thân.`);
+  }
+
+  // 3. Layout Reflow & Lọc Header/Footer/Số trang
+  console.log(`\n🧹 [3/4] Đang lọc bỏ running headers, running footers, số trang và reflow đoạn văn...`);
+  const cleanedPages = removeHeadersAndFooters(extraction.pages, {
+    bookTitle,
+    toc
+  });
+
+  // Cấu trúc hoá văn bản thuần túy (dùng TOC Anchor nếu có)
+  const fullStructuredHtml = convertPagesToCleanHtml(cleanedPages, bookTitle, toc);
 
   // 4. Cắt chương và dựng EPUB Workspace
   console.log(`\n📚 [4/4] Đang phân tách chương và khởi tạo cấu trúc EPUB chuẩn vào workspace...`);
@@ -127,6 +145,8 @@ async function main() {
     bookTitle,
     sourcePdfPath: pdfPath,
     coverImagePath: finalCoverImage,
+    backCoverImagePath: extraction.backCoverImagePath,
+    imagesSourceDir: extraction.extractedImagesDir || imagesTempDir,
     targetDir: workspaceDir,
     autoFootnotes: false // Giữ nguyên bản chú thích ở bước trích xuất PDF
   });

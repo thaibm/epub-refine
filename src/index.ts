@@ -311,7 +311,8 @@ async function main() {
       continue;
     }
 
-    const prompt = buildChapterPrompt(pkg.metadata.title, ch.relativeHref, topElements, paragraphs);
+    const existingH2Count = proc.$('h2').length;
+    const prompt = buildChapterPrompt(pkg.metadata.title, ch.relativeHref, topElements, paragraphs, existingH2Count);
 
     try {
       const aiResult = await gemini.analyzeChapter(prompt);

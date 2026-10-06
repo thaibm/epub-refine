@@ -4,7 +4,8 @@ export function buildChapterPrompt(
   bookTitle: string,
   chapterFileName: string,
   topElements: TopElementInfo[],
-  paragraphs: ParagraphInfo[]
+  paragraphs: ParagraphInfo[],
+  existingH2Count = 0
 ): string {
   const topElementsFormatted = topElements
     .map((e) => `[Index ${e.index}] <${e.tagName}${e.id ? ` id="${e.id}"` : ''}${e.className ? ` class="${e.className}"` : ''}>: "${e.text}"`)
@@ -14,6 +15,13 @@ export function buildChapterPrompt(
   const paragraphsFormatted = paragraphs
     .map((p) => `[p_idx=${p.idx}] ${p.text}`)
     .join('\n');
+
+  const headingSectionInstruction = existingH2Count > 0
+    ? `⚠️ ĐẶC BIỆT LƯU Ý: Chương này ĐÃ CÓ ${existingH2Count} đề mục chính (H2) chuẩn xác theo Mục lục xuất bản.
+- TUYỆT ĐỐI KHÔNG đề xuất thêm bất kỳ thẻ <h2> nào.
+- Nếu phát hiện các tiểu mục con bên trong các đoạn văn, bạn CHỈ ĐƯỢC đề xuất thẻ <h3>, hoặc trả về mảng "headings": [] nếu không cần thiết.`
+    : `- Rất nhiều tiểu mục trong sách bị định dạng nhầm thành thẻ <p> thường (ví dụ: các dòng bắt đầu bằng "1. ...", "2. ...", "a. ...", "b. ...", "Phương pháp...", "Thói quen thứ...", hoặc các phần phân đoạn quan trọng).
+- Hãy xác định các tiêu đề H2 (mục lớn trong chương) và H3 (tiểu mục con trong H2).`;
 
   return `Bạn là một chuyên gia biên tập sách và xuất bản EPUB tiếng Việt chuyên nghiệp.
 Cuốn sách đang xử lý: "${bookTitle}"
@@ -38,8 +46,7 @@ ${topElementsFormatted}
 Đọc toàn bộ nội dung các đoạn văn sau:
 ${paragraphsFormatted}
 
-- Rất nhiều tiểu mục trong sách bị định dạng nhầm thành thẻ <p> thường (ví dụ: các dòng bắt đầu bằng "1. ...", "2. ...", "a. ...", "b. ...", "Phương pháp...", "Thói quen thứ...", hoặc các phần phân đoạn quan trọng).
-- Hãy xác định các tiêu đề H2 (mục lớn trong chương) và H3 (tiểu mục con trong H2).
+${headingSectionInstruction}
 - Với mỗi heading, chỉ định:
   + "tag": "h2" hoặc "h3"
   + "title": Tiêu đề sạch sẽ, chuẩn xác

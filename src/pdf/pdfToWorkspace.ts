@@ -21,6 +21,8 @@ export interface WorkspaceCreationOptions {
   author?: string;
   sourcePdfPath: string;
   coverImagePath?: string;
+  backCoverImagePath?: string;
+  imagesSourceDir?: string;
   targetDir?: string;
   autoFootnotes?: boolean;
 }
@@ -63,6 +65,18 @@ blockquote {
   max-width: 100%;
   max-height: 100vh;
   height: auto;
+}
+
+.photo-plate {
+  text-align: center;
+  margin: 1.5em auto;
+}
+
+.photo-plate img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 .footnotes {
@@ -181,12 +195,32 @@ export async function buildEpubWorkspace(
 `;
   fs.writeFileSync(path.join(metaInfDir, 'container.xml'), containerXml, 'utf-8');
 
-  // 4. Xử lý ảnh bìa
+  // 4. Xử lý ảnh bìa và thư mục ảnh
   let hasCoverImage = false;
   if (options.coverImagePath && fs.existsSync(options.coverImagePath)) {
     const destCover = path.join(imagesDir, 'cover.jpg');
     fs.copyFileSync(options.coverImagePath, destCover);
     hasCoverImage = true;
+  }
+
+  // Copy các ảnh đã trích xuất từ options.imagesSourceDir sang imagesDir
+  if (options.imagesSourceDir && fs.existsSync(options.imagesSourceDir)) {
+    const files = fs.readdirSync(options.imagesSourceDir);
+    for (const f of files) {
+      const srcFile = path.join(options.imagesSourceDir, f);
+      const destFile = path.join(imagesDir, f);
+      if (fs.statSync(srcFile).isFile()) {
+        fs.copyFileSync(srcFile, destFile);
+      }
+    }
+  }
+
+  // Xử lý ảnh bìa sau (nếu có)
+  let hasBackCoverImage = false;
+  if (options.backCoverImagePath && fs.existsSync(options.backCoverImagePath)) {
+    const destBackCover = path.join(imagesDir, 'back_cover.jpg');
+    fs.copyFileSync(options.backCoverImagePath, destBackCover);
+    hasBackCoverImage = true;
   }
 
   // 5. Ghi file styles.css
@@ -198,7 +232,7 @@ export async function buildEpubWorkspace(
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="vi">
 <head>
-  <title>Bìa sách</title>
+  <title>Bìa trước</title>
   <meta charset="utf-8"/>
   <link rel="stylesheet" type="text/css" href="styles.css"/>
 </head>
@@ -210,6 +244,26 @@ export async function buildEpubWorkspace(
 </html>
 `;
     fs.writeFileSync(path.join(oebpsDir, 'cover.xhtml'), coverXhtml, 'utf-8');
+  }
+
+  // Ghi trang bìa sau back_cover.xhtml nếu có ảnh bìa sau
+  if (hasBackCoverImage) {
+    const backCoverXhtml = `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="vi">
+<head>
+  <title>Bìa sau</title>
+  <meta charset="utf-8"/>
+  <link rel="stylesheet" type="text/css" href="styles.css"/>
+</head>
+<body>
+  <div class="cover-image">
+    <img src="images/back_cover.jpg" alt="Bìa sau ${options.bookTitle}"/>
+  </div>
+</body>
+</html>
+`;
+    fs.writeFileSync(path.join(oebpsDir, 'back_cover.xhtml'), backCoverXhtml, 'utf-8');
   }
 
   // 7. Ghi các chương nội dung và thu thập Headings để dựng TOC
@@ -288,6 +342,27 @@ ${bodyInner}
     manifestItems.push(`    <item id="${ch.id}" href="${ch.id}.xhtml" media-type="application/xhtml+xml"/>`);
   }
 
+  // Quét toàn bộ ảnh trong images/ để đăng ký vào manifest
+  if (fs.existsSync(imagesDir)) {
+    const imgFiles = fs.readdirSync(imagesDir).filter((f) => !f.startsWith('.')).sort();
+    for (const imgFile of imgFiles) {
+      if (imgFile === 'cover.jpg') continue; // Đã thêm riêng ở cover-image
+      const ext = path.extname(imgFile).toLowerCase();
+      let mime = 'image/jpeg';
+      if (ext === '.png') mime = 'image/png';
+      else if (ext === '.gif') mime = 'image/gif';
+      else if (ext === '.svg') mime = 'image/svg+xml';
+      else if (ext === '.webp') mime = 'image/webp';
+
+      const imgId = `img_${imgFile.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+      manifestItems.push(`    <item id="${imgId}" href="images/${imgFile}" media-type="${mime}"/>`);
+    }
+  }
+
+  if (hasBackCoverImage) {
+    manifestItems.push(`    <item id="back_cover" href="back_cover.xhtml" media-type="application/xhtml+xml"/>`);
+  }
+
   const spineItems: string[] = [];
   if (hasCoverImage) {
     spineItems.push(`    <itemref idref="cover" linear="no"/>`);
@@ -295,6 +370,9 @@ ${bodyInner}
   spineItems.push(`    <itemref idref="nav"/>`);
   for (const ch of chapters) {
     spineItems.push(`    <itemref idref="${ch.id}"/>`);
+  }
+  if (hasBackCoverImage) {
+    spineItems.push(`    <itemref idref="back_cover"/>`);
   }
 
   const opfXml = `<?xml version="1.0" encoding="utf-8"?>
