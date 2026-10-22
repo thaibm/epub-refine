@@ -5,7 +5,8 @@ export function buildChapterPrompt(
   chapterFileName: string,
   topElements: TopElementInfo[],
   paragraphs: ParagraphInfo[],
-  existingH2Count = 0
+  existingH2Count = 0,
+  officialChapterTitle?: string
 ): string {
   const topElementsFormatted = topElements
     .map((e) => `[Index ${e.index}] <${e.tagName}${e.id ? ` id="${e.id}"` : ''}${e.className ? ` class="${e.className}"` : ''}>: "${e.text}"`)
@@ -21,7 +22,19 @@ export function buildChapterPrompt(
 - TUYỆT ĐỐI KHÔNG đề xuất thêm bất kỳ thẻ <h2> nào.
 - Nếu phát hiện các tiểu mục con bên trong các đoạn văn, bạn CHỈ ĐƯỢC đề xuất thẻ <h3>, hoặc trả về mảng "headings": [] nếu không cần thiết.`
     : `- Rất nhiều tiểu mục trong sách bị định dạng nhầm thành thẻ <p> thường (ví dụ: các dòng bắt đầu bằng "1. ...", "2. ...", "a. ...", "b. ...", "Phương pháp...", "Thói quen thứ...", hoặc các phần phân đoạn quan trọng).
-- Hãy xác định các tiêu đề H2 (mục lớn trong chương) và H3 (tiểu mục con trong H2).`;
+- Hãy xác định các tiêu đề H2 (mục lớn trong chương) và H3 (tiểu mục con trong H2).
+- TUYỆT ĐỐI KHÔNG tự ý biến các câu kể chuyện thông thường thành heading. Nếu chương không có phân mục rõ ràng, hãy trả về mảng rỗng "headings": [].`;
+
+  const h1Instruction = officialChapterTitle
+    ? `⚠️ TIÊU ĐỀ CHƯƠNG CHUẨN ĐÃ ĐƯỢC XÁC ĐỊNH THEO MỤC LỤC SÁCH (NAV.XHTML):
+"${officialChapterTitle}"
+- BẮT BUỘC giữ nguyên tiêu đề này trong "h1": { "title": "${officialChapterTitle}", "removeTopIndices": [...] }.
+- TUYỆT ĐỐI KHÔNG tự ý suy đoán, dịch lại hay thay đổi tên chương.`
+    : `- Rất nhiều sách bị lỗi gắn nhầm thẻ tiêu đề thành <h4>, <h3> hoặc <p>, hoặc bị lặp lại/phân mảnh (ví dụ 1 dòng là "Thói Quen Thứ 1", dòng sau lặp lại "THÓI QUEN THỨ 1", dòng thứ 3 là "Chấp nhận toàn bộ con người mình").
+- Hãy xác định tiêu đề H1 ĐẦY ĐỦ, CHÍNH XÁC của chương này (Ví dụ: "Thói Quen Thứ 1: Chấp nhận toàn bộ con người mình").
+- NẾU TẬP TIN LÀ MỘT PHẦN (ví dụ mở đầu bằng "Phần 1", "Phần 2"...):
+  + Tiêu đề H1 chuẩn là tên Phần (ví dụ: "Phần 1", "Phần 5").
+  + Các chương bên trong (như "Chương 1", "Chương 2"...) đã có sẵn tiêu đề H2 trong bài, TUYỆT ĐỐI KHÔNG đề xuất lại thẻ heading H2 cho các tên chương đã có này. Chỉ đề xuất H3 cho các tiểu mục con bên trong chương nếu có.`;
 
   return `Bạn là một chuyên gia biên tập sách và xuất bản EPUB tiếng Việt chuyên nghiệp.
 Cuốn sách đang xử lý: "${bookTitle}"
@@ -33,11 +46,7 @@ Nhiệm vụ của bạn gồm 3 phần:
 Quan sát các phần tử đầu trang dưới đây:
 ${topElementsFormatted}
 
-- Rất nhiều sách bị lỗi gắn nhầm thẻ tiêu đề thành <h4>, <h3> hoặc <p>, hoặc bị lặp lại/phân mảnh (ví dụ 1 dòng là "Thói Quen Thứ 1", dòng sau lặp lại "THÓI QUEN THỨ 1", dòng thứ 3 là "Chấp nhận toàn bộ con người mình").
-- Hãy xác định tiêu đề H1 ĐẦY ĐỦ, CHÍNH XÁC của chương này (Ví dụ: "Thói Quen Thứ 1: Chấp nhận toàn bộ con người mình").
-- NẾU TẬP TIN LÀ MỘT PHẦN (ví dụ mở đầu bằng "Phần 1", "Phần 2"...):
-  + Tiêu đề H1 chuẩn là tên Phần (ví dụ: "Phần 1", "Phần 5").
-  + Các chương bên trong (như "Chương 1", "Chương 2"...) đã có sẵn tiêu đề H2 trong bài, TUYỆT ĐỐI KHÔNG đề xuất lại thẻ heading H2 cho các tên chương đã có này. Chỉ đề xuất H3 cho các tiểu mục con bên trong chương nếu có.
+${h1Instruction}
 - Liệt kê các chỉ số (Index) trong topElements cần loại bỏ/thay thế vì bị lặp lại hoặc rác:
   + CHỈ đưa vào removeTopIndices các dòng lặp lại đúng tên chương hoặc tên sách rác ở đầu trang.
   + TUYỆT ĐỐI KHÔNG đưa vào removeTopIndices các thẻ tiêu đề phụ (sub-headings, subtitles như <h3>, <h2>) có nội dung độc lập (ví dụ tên tiết, phụ đề chương, câu danh ngôn mở đầu). Các thẻ này phải được GIỮ NGUYÊN trong văn bản.
@@ -54,6 +63,7 @@ ${headingSectionInstruction}
 
 3. SỬA LỖI CHÍNH TẢ / GÕ PHÍM (SPELLING & TYPO FIXES):
 - Rà soát các lỗi gõ sai dấu, lỗi Telex/VNI trong tiếng Việt (ví dụ: "cuộc sông" -> "cuộc sống", "nổ lực" -> "nỗ lực", "vủa bạn" -> "của bạn", "hiên tại" -> "hiện tại", "bản thân minh" -> "bản thân mình").
+- Rà soát và sửa các từ tiếng Anh bị sót chưa dịch ở đầu câu hoặc trong câu tiếng Việt (ví dụ: "But đó không phải..." -> "Nhưng đó không phải...", "And—dù..." -> "Và—dù...").
 - QUY TẮC CỰC KỲ QUAN TRỌNG:
   + CHỈ sửa lỗi chính tả thật sự.
   + TUYỆT ĐỐI KHÔNG sửa, xoá hoặc lược bỏ các ký hiệu chú thích như [1], [2], [3], [*], <sup>[1]</sup> trong văn bản. Không được coi các dấu ngoặc vuông chú thích là lỗi chính tả.

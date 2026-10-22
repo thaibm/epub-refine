@@ -16,6 +16,22 @@ export interface ChapterBoundary {
  */
 export function isTableOfContentsFile(htmlContent: string, relativeHref: string, ncxTocLabel?: string): boolean {
   const lowerName = relativeHref.toLowerCase();
+  // nav.xhtml là EPUB 3 Navigation Document, không phải trang Inline TOC đọc trong sách
+  if (lowerName === 'nav.xhtml' || lowerName.endsWith('/nav.xhtml')) {
+    return false;
+  }
+
+  // File chú thích (Footnote / Endnotes / Chú thích cuối sách) không phải là TOC
+  if (
+    lowerName.includes('footnote') ||
+    lowerName.includes('chuthich') ||
+    lowerName.includes('endnote') ||
+    htmlContent.toLowerCase().includes('epub:type="footnotes"') ||
+    htmlContent.toLowerCase().includes('role="doc-endnotes"')
+  ) {
+    return false;
+  }
+
   if (lowerName.includes('toc') || lowerName.includes('mục_lục') || lowerName.includes('muc_luc')) {
     return true;
   }

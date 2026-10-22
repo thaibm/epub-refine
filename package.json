@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "tsx src/index.ts --no-pack",
     "unpack": "tsx src/cli/unpack.ts",
     "pack": "tsx src/cli/pack.ts",
     "toc": "tsx src/cli/updateToc.ts",

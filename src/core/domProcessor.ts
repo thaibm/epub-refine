@@ -19,7 +19,7 @@ export class ChapterDomProcessor {
   public $: cheerio.CheerioAPI;
   private chapterFileRelativeHref: string;
 
-  constructor(htmlContent: string, chapterFileRelativeHref: string) {
+  constructor(htmlContent: string, chapterFileRelativeHref: string, options?: { reflowParagraphs?: boolean }) {
     this.chapterFileRelativeHref = chapterFileRelativeHref;
     // Dùng xml: { decodeEntities: false } để bảo toàn tiếng Việt UTF-8 và cú pháp tự đóng thẻ XHTML
     this.$ = cheerio.load(htmlContent, {
@@ -31,8 +31,37 @@ export class ChapterDomProcessor {
     // Tự động phân tách các thẻ <p> chứa nhiều thẻ <br/> (do Calibre gộp đoạn văn) thành các đoạn văn riêng
     this.unpackParagraphs();
 
-    // Tự động nối các đoạn văn bị ngắt vụn (hard-wrapped theo dòng in PDF/ảnh)
-    this.reflowBrokenParagraphs();
+    // Tự động dọn dẹp các thẻ <p> rỗng dùng làm khoảng trắng giả (Calibre spacer <p> với height:1em và &nbsp;)
+    this.removeEmptySpacerParagraphs();
+
+    // CHỈ nối đoạn văn khi được kích hoạt rõ ràng (như luồng chuyển đổi text thô từ PDF)
+    if (options?.reflowParagraphs) {
+      this.reflowBrokenParagraphs();
+    }
+  }
+
+  /**
+   * Tự động dọn dẹp các thẻ <p> rỗng chỉ dùng làm khoảng trắng giả (thường do Calibre xuất: height:1em và &nbsp;)
+   */
+  removeEmptySpacerParagraphs(): number {
+    let removedCount = 0;
+    this.$('p').each((_, el) => {
+      const $el = this.$(el);
+      const text = $el.text().replace(/\u00a0/g, ' ').trim();
+      const hasChildren = $el.find('img, svg, audio, video, a[id], a[href]').length > 0;
+      const isSpacer = $el.attr('style')?.includes('height:1em') ||
+                       $el.hasClass('calibre3') ||
+                       $el.hasClass('calibre8') ||
+                       $el.html()?.trim() === '&nbsp;' ||
+                       $el.html()?.trim() === '&#160;' ||
+                       $el.html()?.trim() === '';
+
+      if (!hasChildren && !text && isSpacer) {
+        $el.remove();
+        removedCount++;
+      }
+    });
+    return removedCount;
   }
 
   /**
@@ -62,10 +91,12 @@ export class ChapterDomProcessor {
           continue;
         }
 
-        const endsWithSentencePunct = /[.!?:…"”»)]\s*$/.test(text);
-        const isAbbreviation = /(?:v\.v|nxb|gs|ts|ths|bs|tp|vn|đh|th|tt|trg|tr)\.\s*$/i.test(text) || /\b[A-ZÀ-Ỹ]\.\s*$/.test(text);
+        // Bỏ qua marker chú thích ở cuối câu (ví dụ [*], [1], <sup>...</sup>) trước khi xét dấu câu kết đoạn
+        const cleanEndText = text.replace(/\[(?:\*+|\d+)\]\s*$/g, '').trim();
+        const endsWithSentencePunct = /[.!?:…"”»)]\s*$/.test(cleanEndText);
+        const isAbbreviation = /(?:v\.v|nxb|gs|ts|ths|bs|tp|vn|đh|th|tt|trg|tr)\.\s*$/i.test(cleanEndText) || /\b[A-ZÀ-Ỹ]\.\s*$/.test(cleanEndText);
         const nextStartsWithLower = /^[a-zà-ỹ]/.test(nextText);
-        const endsWithHyphen = /[-–]\s*$/.test(text);
+        const endsWithHyphen = /[-–]\s*$/.test(cleanEndText);
 
         const isCurHeading = (!/\p{Ll}/u.test(text) && /\p{Lu}/u.test(text) && text.length < 80) ||
                              /^\s*(?:chương|phần|tiết|mục|hồi)\b/iu.test(text);
@@ -200,7 +231,7 @@ export class ChapterDomProcessor {
    * - Bảo toàn toàn bộ thẻ liên kết chú thích <a> nếu phần tử đầu trang có chứa
    * - Xoá các thẻ trùng lặp thừa ở đầu trang trong container
    */
-  normalizeH1(newH1Title: string, removeTopIndices: number[] = [], preferredId?: string): string {
+  normalizeH1(newH1Title: string, removeTopIndices: number[] = [], preferredId?: string, bookTitle?: string): string {
     const container = this.getContentContainer();
     let chosenId = preferredId;
 
@@ -242,27 +273,42 @@ export class ChapterDomProcessor {
       if (tagName === 'div' && (!text || text === ' ' || text === '&#160;')) return;
 
       const isCandidateForRemoval = removeTopIndices.includes(topCount);
-      const isDefaultFirst = (removeTopIndices.length === 0 && topCount === 0);
 
-      if (isCandidateForRemoval || isDefaultFirst) {
-        // Trích xuất các thẻ footnote trong các phần tử sắp bị thay thế / xoá
-        $el.find('a[href*="#"]').each((_, aEl) => {
-          const $a = this.$(aEl);
-          const href = $a.attr('href') || '';
-          if (/chuthich|footnote|fn|note/i.test(href) || $a.find('sup').length > 0 || $a.attr('epub:type') === 'noteref') {
-            preservedFootnotesHtml += this.$.html(aEl);
-          }
-        });
+      if (isCandidateForRemoval) {
+        const isHeadingTag = /^h[1-6]$/.test(tagName);
+        const cleanEndText = text.replace(/\[(?:\*+|\d+)\]\s*$/g, '').trim();
+        const lowerText = cleanEndText.toLowerCase();
+        const cleanBook = (bookTitle || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
-        if (isCandidateForRemoval) {
-          // Bảo vệ đoạn văn nội dung: nếu đoạn văn dài (> 80 ký tự) thì không xoá nhầm
-          const isLongContent = text.length > 80;
+        // Kiểm tra xem phần tử có thực sự là tiêu đề có thể thay thế được hay không:
+        // 1. Thẻ là heading (h1-h6)
+        // 2. Hoặc văn bản trùng khớp hoàn toàn / một phần với tiêu đề mới (cleanNewH1)
+        // 3. Hoặc văn bản trùng với tựa sách (running header)
+        // 4. Hoặc văn bản bắt đầu bằng từ khóa chương/phần/hồi/tiết (CHAPTER_REGEX)
+        // TUYỆT ĐỐI không xoá thơ, lời đề từ (epigraph), trích dẫn hoặc văn bản nội dung!
+        const isTitleMatch = cleanNewH1 === lowerText || cleanNewH1.includes(lowerText) || (lowerText.length < 80 && lowerText.includes(cleanNewH1));
+        const isBookMatch = Boolean(cleanBook && (cleanBook === lowerText || cleanBook.includes(lowerText) || lowerText.includes(cleanBook)));
+        const isChapterPattern = CHAPTER_REGEX.test(cleanEndText) || /^\s*(?:chương|phần|tiết|mục|hồi|bài|tập|quyển|cuốn|vol|volume|chapter|part|section)\b/iu.test(cleanEndText);
 
+        const isReplaceableTitle = isHeadingTag || isTitleMatch || isBookMatch || isChapterPattern;
+
+        // Chỉ trích xuất thẻ footnote nếu phần tử bị thay thế là tiêu đề cũ thực sự
+        if (isReplaceableTitle && !firstElementToReplace) {
+          $el.find('a[href*="#"]').each((_, aEl) => {
+            const $a = this.$(aEl);
+            const href = $a.attr('href') || '';
+            if (/chuthich|footnote|fn|note/i.test(href) || $a.find('sup').length > 0 || $a.attr('epub:type') === 'noteref') {
+              preservedFootnotesHtml += this.$.html(aEl);
+            }
+          });
+        }
+
+        if (isReplaceableTitle) {
           // Bảo vệ thẻ heading phụ (h2, h3, h4, h5, h6):
           // Nếu thẻ là heading độc lập (không trùng lặp với newH1Title), TUYỆT ĐỐI KHÔNG xoá!
-          const isHeadingTag = /^h[2-6]$/.test(tagName);
+          const isSubHeading = /^h[2-6]$/.test(tagName);
           const lowerText = text.toLowerCase();
-          const isHeadingDuplicate = isHeadingTag && (
+          const isHeadingDuplicate = isSubHeading && (
             lowerText === cleanNewH1 ||
             cleanNewH1.startsWith(lowerText) ||
             lowerText.startsWith(cleanNewH1)
@@ -274,8 +320,8 @@ export class ChapterDomProcessor {
               chosenId = $el.attr('id');
             }
           } else {
-            // Chỉ xoá nếu không phải nội dung dài và không phải heading phụ hợp lệ
-            if (!isLongContent && (!isHeadingTag || isHeadingDuplicate)) {
+            // Chỉ xoá nếu là heading trùng lặp hoặc tiêu đề rác cũ cần dọn
+            if (!isSubHeading || isHeadingDuplicate) {
               elementsToRemove.push($el);
             }
           }
@@ -369,15 +415,24 @@ export class ChapterDomProcessor {
       });
       if (alreadyExists) continue;
 
-      // Trích xuất chú thích bên trong targetP nếu có
+      // Kiểm tra: Nếu đoạn <p> chính là dòng tiêu đề (ví dụ text của <p> trùng hoặc tương tự tiêu đề)
+      // thì thay thế <p> thành <h2/h3> để không bị lặp chữ
+      const isSameText = pText.toLowerCase() === cleanTitle.toLowerCase() ||
+        pText.startsWith(cleanTitle) ||
+        cleanTitle.startsWith(pText);
+
+      // Trích xuất chú thích bên trong targetP CHỈ KHI đoạn <p> chính là dòng tiêu đề được thăng cấp (promote)
+      // Khi chèn heading mới trước đoạn văn nội dung (!isSameText), TUYỆT ĐỐI KHÔNG sao chép footnote của đoạn văn vào heading!
       let footnoteHtml = '';
-      targetP.find('a[href*="#"]').each((_, aEl) => {
-        const $a = this.$(aEl);
-        const href = $a.attr('href') || '';
-        if (/chuthich|footnote|fn|note/i.test(href) || $a.find('sup').length > 0 || $a.attr('epub:type') === 'noteref') {
-          footnoteHtml += this.$.html(aEl);
-        }
-      });
+      if (isSameText && pText.length < 120) {
+        targetP.find('a[href*="#"]').each((_, aEl) => {
+          const $a = this.$(aEl);
+          const href = $a.attr('href') || '';
+          if (/chuthich|footnote|fn|note/i.test(href) || $a.find('sup').length > 0 || $a.attr('epub:type') === 'noteref') {
+            footnoteHtml += this.$.html(aEl);
+          }
+        });
+      }
 
       // Sinh hoặc tái sử dụng id duy nhất
       const pId = targetP.attr('id');
@@ -391,12 +446,6 @@ export class ChapterDomProcessor {
       const styleAttr = pStyle ? ` style="${pStyle}"` : '';
 
       const headingHtml = `<${tag} id="${sectionId}" class="${headingClass}"${styleAttr}>${cleanTitle}${footnoteHtml}</${tag}>`;
-
-      // Kiểm tra: Nếu đoạn <p> chính là dòng tiêu đề (ví dụ text của <p> trùng hoặc tương tự tiêu đề)
-      // thì thay thế <p> thành <h2/h3> để không bị lặp chữ
-      const isSameText = pText.toLowerCase() === cleanTitle.toLowerCase() ||
-        pText.startsWith(cleanTitle) ||
-        cleanTitle.startsWith(pText);
 
       if (isSameText && pText.length < 120) {
         targetP.replaceWith(headingHtml);
@@ -610,7 +659,18 @@ export class ChapterDomProcessor {
       if (tagName === 'h2') level = 2;
       else if (tagName === 'h3') level = 3;
 
-      const title = $el.text().trim();
+      // Clone element và loại bỏ toàn bộ các thẻ chú thích / số mũ / ghi chú trước khi lấy text
+      const $clone = $el.clone();
+      $clone.find('a[href*="#"], a[role*="doc-noteref"], a[epub\\:type*="noteref"], sup, aside').remove();
+
+      let title = $clone.text().replace(/\s+/g, ' ').trim();
+      // Loại bỏ triệt để mọi marker chú thích dạng [*], [**], [1], v.v.
+      title = title
+        .replace(/\s*\[(?:\*+|\d+)\]/g, '')
+        .replace(/\s*\*+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
       if (!title) return;
 
       // Nếu trong file KHÔNG có thẻ h1 nào, nhưng h2 lại là tên chương chính ("Chương 1", "Chapter 1"...)

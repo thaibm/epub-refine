@@ -5,6 +5,8 @@ import { loadEpubFromDir } from '../core/epubArchive.js';
 import { OpfManager } from '../core/opfManager.js';
 import { ChapterDomProcessor } from '../core/domProcessor.js';
 import { TocBuilder } from '../core/tocBuilder.js';
+import { isTableOfContentsFile } from '../core/chapterSplitter.js';
+import { FootnoteProcessor } from '../core/footnoteProcessor.js';
 import type { HeadingItem } from '../types/index.js';
 
 const program = new Command();
@@ -38,43 +40,61 @@ program
 
     console.log(`📖 Sách: "${pkg.metadata.title}"`);
 
-    // 1. Quét toàn bộ các chương trong spine để thu thập đầy đủ Headings (H1, H2, H3)
-    const spineChapters = opfManager.getSpineChapterFiles();
-    const fullBookHeadings: HeadingItem[] = [];
-
-    for (const ch of spineChapters) {
-      const name = ch.relativeHref.toLowerCase();
-      // Bỏ qua trang bìa và trang mục lục
-      if (name.includes('titlepage') || name.includes('cover') || name.includes('part0000') || name.includes('part0001') || name.includes('part0014')) {
-        continue;
-      }
-
-      if (!unpacked.hasFile(ch.zipPath)) continue;
-      const html = unpacked.getFileString(ch.zipPath);
-      const proc = new ChapterDomProcessor(html, ch.relativeHref);
-      const headings = proc.collectHeadings();
-      fullBookHeadings.push(...headings);
-    }
-
-    console.log(`🔍 Đã thu thập: ${fullBookHeadings.length} mục tiêu đề từ các chương.`);
-    const tocTree = TocBuilder.buildTree(fullBookHeadings);
-
-    const bookUid = pkg.metadata.identifier || `urn:uuid:${Math.random().toString(36).substring(2)}`;
-
-    // 2. Cập nhật toc.ncx (EPUB 2)
-    const ncxContent = TocBuilder.generateNcx(tocTree, pkg.metadata.title, bookUid);
-    const ncxPath = pkg.tocHref ? opfManager.resolvePathInZip(pkg.tocHref) : 'toc.ncx';
-    unpacked.setFileString(ncxPath, ncxContent);
-    console.log(`✅ Đã cập nhật: ${ncxPath} (EPUB 2 NCX)`);
-
-    // 3. Cập nhật nav.xhtml (EPUB 3)
-    const navContent = TocBuilder.generateNavXhtml(tocTree, pkg.metadata.title);
+    // 1. Kiểm tra xem sách đã có nav.xhtml hoặc toc.ncx chuẩn từ trước chưa
     const navRelativeHref = 'nav.xhtml';
     const navZipPath = opfManager.resolvePathInZip(navRelativeHref);
-    unpacked.setFileString(navZipPath, navContent);
-    opfManager.ensureManifestItem('nav', navRelativeHref, 'application/xhtml+xml', 'nav');
-    opfManager.save();
-    console.log(`✅ Đã cập nhật: ${navZipPath} (EPUB 3 Navigation Document)`);
+    const hasExistingNav = unpacked.hasFile(navZipPath) || unpacked.hasFile('nav.xhtml');
+    const hasExistingNcx = (pkg.tocHref && unpacked.hasFile(opfManager.resolvePathInZip(pkg.tocHref))) || unpacked.hasFile('toc.ncx') || unpacked.hasFile('OEBPS/toc.ncx');
+
+    let tocTree: HeadingItem[] = [];
+
+    if (hasExistingNav || hasExistingNcx) {
+      console.log(`🛡️ Phát hiện Mục lục chuẩn (nav.xhtml/toc.ncx), tiến hành bảo tồn và đồng bộ hai chiều...`);
+      const syncRes = TocBuilder.preserveAndSyncToc(unpacked, opfManager, pkg.metadata.title);
+      console.log(`✅ Đã bảo tồn và đồng bộ ${syncRes.totalHeadings} mục tiêu đề vào mục lục.`);
+
+      if (unpacked.hasFile(navZipPath)) {
+        tocTree = TocBuilder.parseNavXhtmlToTree(unpacked.getFileString(navZipPath));
+      }
+    } else {
+      // 1. Quét toàn bộ các chương trong spine để thu thập đầy đủ Headings (H1, H2, H3)
+      const spineChapters = opfManager.getSpineChapterFiles();
+      const fullBookHeadings: HeadingItem[] = [];
+
+      for (const ch of spineChapters) {
+        const name = ch.relativeHref.toLowerCase();
+        // Bỏ qua trang bìa và trang mục lục
+        if (name.includes('titlepage') || name.includes('cover') || name.includes('part0000') || name.includes('part0001') || name.includes('part0014')) {
+          continue;
+        }
+
+        if (!unpacked.hasFile(ch.zipPath)) continue;
+        const html = unpacked.getFileString(ch.zipPath);
+        if (isTableOfContentsFile(html, ch.relativeHref)) continue;
+        if (FootnoteProcessor.isFootnoteFile(html, ch.relativeHref)) continue;
+        const proc = new ChapterDomProcessor(html, ch.relativeHref);
+        const headings = proc.collectHeadings();
+        fullBookHeadings.push(...headings);
+      }
+
+      console.log(`🔍 Đã thu thập: ${fullBookHeadings.length} mục tiêu đề từ các chương.`);
+      tocTree = TocBuilder.buildTree(fullBookHeadings);
+
+      const bookUid = pkg.metadata.identifier || `urn:uuid:${Math.random().toString(36).substring(2)}`;
+
+      // 2. Cập nhật toc.ncx (EPUB 2)
+      const ncxContent = TocBuilder.generateNcx(tocTree, pkg.metadata.title, bookUid);
+      const ncxPath = pkg.tocHref ? opfManager.resolvePathInZip(pkg.tocHref) : 'toc.ncx';
+      unpacked.setFileString(ncxPath, ncxContent);
+      console.log(`✅ Đã cập nhật: ${ncxPath} (EPUB 2 NCX)`);
+
+      // 3. Cập nhật nav.xhtml (EPUB 3)
+      const navContent = TocBuilder.generateNavXhtml(tocTree, pkg.metadata.title);
+      unpacked.setFileString(navZipPath, navContent);
+      opfManager.ensureManifestItem('nav', navRelativeHref, 'application/xhtml+xml', 'nav');
+      opfManager.save();
+      console.log(`✅ Đã cập nhật: ${navZipPath} (EPUB 3 Navigation Document)`);
+    }
 
     // 4. Cập nhật các trang Mục lục đọc trực tiếp trong sách (Inline TOC như part0001.html, part0014.html)
     const allFiles = unpacked.listFiles();
@@ -82,10 +102,15 @@ program
 
     for (const f of allFiles) {
       if (!f.endsWith('.html') && !f.endsWith('.xhtml')) continue;
+      if (f === 'nav.xhtml' || f.endsWith('/nav.xhtml')) continue;
+
       const content = unpacked.getFileString(f);
+      if (FootnoteProcessor.isFootnoteFile(content, f)) continue;
+
       const lower = content.toLowerCase();
 
       const isInlineToc =
+        isTableOfContentsFile(content, f) ||
         lower.includes('mục lục | table of contents') ||
         lower.includes('calibre_generated_inline_toc') ||
         (lower.includes('table of contents') && (lower.includes('<ul class="level"') || lower.includes("<ul class='level'")));

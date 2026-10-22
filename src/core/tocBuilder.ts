@@ -2,6 +2,16 @@ import path from 'node:path';
 import * as cheerio from 'cheerio';
 import type { HeadingItem } from '../types/index.js';
 
+export function cleanTocTitle(title: string): string {
+  if (!title) return '';
+  return title
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s*\[(?:\*+|\d+)\]/g, '')
+    .replace(/\s*\*+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export class TocBuilder {
   /**
    * Chuyển đổi danh sách phẳng các heading thành cây phân cấp:
@@ -15,6 +25,7 @@ export class TocBuilder {
     for (const item of flatHeadings) {
       const node: HeadingItem = {
         ...item,
+        title: cleanTocTitle(item.title),
         children: []
       };
 
@@ -54,7 +65,7 @@ export class TocBuilder {
       let xml = '';
       for (const node of nodes) {
         const currentOrder = playOrder++;
-        const safeTitle = escapeXml(node.title);
+        const safeTitle = escapeXml(cleanTocTitle(node.title));
         const safeHref = escapeXml(node.href);
         const pointId = `nav_${currentOrder}`;
 
@@ -99,8 +110,9 @@ ${navPointsXml}  </navMap>
     function renderOl(nodes: HeadingItem[]): string {
       let html = '<ol>\n';
       for (const node of nodes) {
+        const safeTitle = escapeXml(cleanTocTitle(node.title));
         html += `  <li>\n`;
-        html += `    <a href="${escapeXml(node.href)}">${escapeXml(node.title)}</a>\n`;
+        html += `    <a href="${escapeXml(node.href)}">${safeTitle}</a>\n`;
         if (node.children && node.children.length > 0) {
           html += renderOl(node.children);
         }
@@ -152,7 +164,7 @@ ${navPointsXml}  </navMap>
         let relLink = path.posix.relative(tocFileDir, targetPath);
         if (targetHash) relLink += `#${targetHash}`;
 
-        const safeTitle = escapeXml(node.title);
+        const safeTitle = escapeXml(cleanTocTitle(node.title));
         const safeHref = escapeXml(relLink);
 
         html += `  <li class="toc-item calibre5">`;
@@ -243,7 +255,9 @@ ${navPointsXml}  </navMap>
         const $el = $(el);
         const tag = el.tagName.toLowerCase();
         const level = tag === 'h1' ? 1 : tag === 'h2' ? 2 : 3;
-        const text = $el.text().replace(/\s+/g, ' ').trim();
+        const $clone = $el.clone();
+        $clone.find('a[href*="#"], a[role*="doc-noteref"], a[epub\\:type*="noteref"], sup, aside').remove();
+        const text = cleanTocTitle($clone.text());
         if (!text) return;
 
         let id = $el.attr('id');
@@ -333,9 +347,102 @@ ${navPointsXml}  </navMap>
   }
 
   /**
+   * Đọc và phân tích cây mục lục từ file nav.xhtml (EPUB 3 Navigation Document)
+   */
+  static parseNavXhtmlToTree(navHtml: string): HeadingItem[] {
+    const $ = cheerio.load(navHtml, { xml: { decodeEntities: false } });
+
+    function parseOl(olEl: any, level: 1 | 2 | 3 = 1): HeadingItem[] {
+      const res: HeadingItem[] = [];
+      $(olEl).children('li').each((_, li) => {
+        const $li = $(li);
+        const $a = $li.children('a').first();
+        if ($a.length === 0) return;
+
+        const href = $a.attr('href') || '';
+        const title = cleanTocTitle($a.text());
+        const id = $a.attr('id') || `nav_${Math.random().toString(36).substring(2, 8)}`;
+        const $subOl = $li.children('ol').first();
+        const nextLevel = Math.min(3, level + 1) as 1 | 2 | 3;
+        const children = $subOl.length > 0 ? parseOl($subOl, nextLevel) : [];
+
+        res.push({
+          id,
+          level,
+          title,
+          href,
+          children
+        });
+      });
+      return res;
+    }
+
+    const $mainOl = $('nav[epub\\:type="toc"] > ol, nav#toc > ol, nav > ol').first();
+    if ($mainOl.length > 0) {
+      return parseOl($mainOl, 1);
+    }
+    return [];
+  }
+
+  /**
+   * Trích xuất bản đồ ánh xạ từ đường dẫn file sang Tiêu đề chương chuẩn từ nav.xhtml hoặc toc.ncx.
+   * Hỗ trợ ánh xạ cả tên file chính xác lẫn file cùng nhóm phân tách (split parts, ví dụ: chapter0002_split_001.html).
+   */
+  static getTocMap(unpacked: any, opfManager: any): Map<string, string> {
+    const map = new Map<string, string>();
+
+    // 1. Ưu tiên đọc nav.xhtml
+    const navZipPath = opfManager.resolvePathInZip('nav.xhtml');
+    let tree: HeadingItem[] = [];
+
+    if (unpacked.hasFile(navZipPath)) {
+      const navHtml = unpacked.getFileString(navZipPath);
+      tree = TocBuilder.parseNavXhtmlToTree(navHtml);
+    } else if (unpacked.hasFile('nav.xhtml')) {
+      const navHtml = unpacked.getFileString('nav.xhtml');
+      tree = TocBuilder.parseNavXhtmlToTree(navHtml);
+    }
+
+    // 2. Nếu không có nav.xhtml, đọc toc.ncx
+    if (tree.length === 0) {
+      const pkg = opfManager.getPackageInfo();
+      const ncxPath = pkg.tocHref ? opfManager.resolvePathInZip(pkg.tocHref) : 'toc.ncx';
+      if (unpacked.hasFile(ncxPath)) {
+        tree = TocBuilder.parseNcxToTree(unpacked.getFileString(ncxPath));
+      }
+    }
+
+    function fillMap(nodes: HeadingItem[]) {
+      for (const node of nodes) {
+        if (node.href && node.title) {
+          const rawHref = node.href.split('#')[0];
+          const normalized = rawHref.replace(/\\/g, '/').replace(/^\/+/, '');
+          const fileName = path.posix.basename(normalized);
+
+          map.set(normalized, node.title);
+          map.set(fileName, node.title);
+
+          // Nếu file có dạng prefix_split_000.html, ánh xạ cả tiền tố (ví dụ chapter0002)
+          const splitMatch = fileName.match(/^(.*?_split_|\w+?)_?(?:split_)?\d+\.(?:x?html)$/i);
+          const baseMatch = fileName.match(/^([a-zA-Z]+[0-9]+)/);
+          if (baseMatch) {
+            map.set(baseMatch[1], node.title);
+          }
+        }
+        if (node.children && node.children.length > 0) {
+          fillMap(node.children);
+        }
+      }
+    }
+
+    fillMap(tree);
+    return map;
+  }
+
+  /**
    * BẢO TỒN VÀ ĐỒNG BỘ MỤC LỤC GỐC:
-   * 1. Nếu sách đã có toc.ncx gốc -> GIỮ NGUYÊN và sinh nav.xhtml (EPUB 3) trực tiếp từ toc.ncx đó.
-   * 2. Nếu sách đã có nav.xhtml gốc -> GIỮ NGUYÊN.
+   * 1. Nếu sách đã có nav.xhtml (EPUB 3) -> GIỮ NGUYÊN và đồng bộ sang toc.ncx (EPUB 2).
+   * 2. Nếu sách đã có toc.ncx gốc -> GIỮ NGUYÊN và sinh nav.xhtml từ toc.ncx.
    * 3. Chỉ khi sách hoàn toàn không có mục lục nào mới quét H1-H3 để tạo mới.
    */
   static preserveAndSyncToc(
@@ -345,8 +452,51 @@ ${navPointsXml}  </navMap>
   ): { totalHeadings: number; navZipPath?: string; ncxZipPath?: string } {
     const pkg = opfManager.getPackageInfo();
     const title = customTitle || pkg.metadata.title || 'Untitled';
+    const bookUid = pkg.metadata.identifier || `urn:uuid:${Math.random().toString(36).substring(2)}`;
 
-    // 1. Kiểm tra file toc.ncx gốc
+    // 1. Ưu tiên kiểm tra file nav.xhtml (EPUB 3)
+    const navRelativeHref = 'nav.xhtml';
+    const navZipPath = opfManager.resolvePathInZip(navRelativeHref);
+    if (unpacked.hasFile(navZipPath)) {
+      const navHtml = unpacked.getFileString(navZipPath);
+      const navTree = TocBuilder.parseNavXhtmlToTree(navHtml);
+      if (navTree.length > 0) {
+        // Đồng bộ sang toc.ncx (EPUB 2)
+        const ncxPath = pkg.tocHref ? opfManager.resolvePathInZip(pkg.tocHref) : 'toc.ncx';
+        const ncxDir = path.posix.dirname(ncxPath);
+        const navDir = path.posix.dirname(navZipPath);
+
+        function adjustHrefsForNcx(nodes: HeadingItem[]): HeadingItem[] {
+          return nodes.map((node) => {
+            let adjustedHref = node.href;
+            if (navDir !== ncxDir) {
+              const targetZipPath = path.posix.join(navDir, node.href);
+              adjustedHref = path.posix.relative(ncxDir, targetZipPath);
+            }
+            return {
+              ...node,
+              href: adjustedHref,
+              children: adjustHrefsForNcx(node.children)
+            };
+          });
+        }
+
+        const adjustedTree = adjustHrefsForNcx(navTree);
+        const ncxContent = TocBuilder.generateNcx(adjustedTree, title, bookUid);
+        unpacked.setFileString(ncxPath, ncxContent);
+
+        opfManager.ensureManifestItem('nav', navRelativeHref, 'application/xhtml+xml', 'nav');
+        opfManager.save();
+
+        return {
+          totalHeadings: navTree.length,
+          navZipPath,
+          ncxZipPath: ncxPath
+        };
+      }
+    }
+
+    // 2. Kiểm tra file toc.ncx gốc
     const ncxPath = pkg.tocHref
       ? opfManager.resolvePathInZip(pkg.tocHref)
       : unpacked.hasFile('toc.ncx')
@@ -363,13 +513,9 @@ ${navPointsXml}  </navMap>
     }
 
     if (ncxTree.length > 0) {
-      // Sách đã có toc.ncx gốc chuẩn -> Đồng bộ sang nav.xhtml (EPUB 3) để Apple Books/Kindle mở được
-      const navRelativeHref = 'nav.xhtml';
-      const navZipPath = opfManager.resolvePathInZip(navRelativeHref);
       const navDir = path.posix.dirname(navZipPath);
       const ncxDir = path.posix.dirname(ncxPath);
 
-      // Điều chỉnh relative href cho nav.xhtml nếu nav.xhtml và toc.ncx ở khác thư mục
       function adjustHrefs(nodes: HeadingItem[]): HeadingItem[] {
         return nodes.map((node) => {
           let adjustedHref = node.href;
@@ -396,20 +542,6 @@ ${navPointsXml}  </navMap>
         navZipPath,
         ncxZipPath: ncxPath
       };
-    }
-
-    // 2. Nếu không có ncx, kiểm tra nav.xhtml có sẵn
-    const navZipPath = opfManager.resolvePathInZip('nav.xhtml');
-    if (unpacked.hasFile(navZipPath)) {
-      const navContent = unpacked.getFileString(navZipPath);
-      const $nav = cheerio.load(navContent, { xml: { decodeEntities: false } });
-      const navLinks = $nav('nav[epub\\:type="toc"] a, nav#toc a, nav a');
-      if (navLinks.length > 0) {
-        return {
-          totalHeadings: navLinks.length,
-          navZipPath
-        };
-      }
     }
 
     // 3. Fallback: chỉ khi sách hoàn toàn không có TOC nào mới quét H1/H2/H3

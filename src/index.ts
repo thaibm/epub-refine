@@ -37,9 +37,10 @@ program
   .option('--fresh', 'Bắt buộc giải nén lại từ file EPUB gốc (ghi đè workspace)', false)
   .option('--split', 'Tự động tách các file chứa nhiều chương thành các file độc lập (mặc định: tắt)', false)
   .option('--merge-parts', 'Gộp các chương theo từng phần (Phần => Chương) vào 1 file (mặc định: tắt)', false)
-  .option('--pack', 'Tự động đóng gói file EPUB sau khi xử lý xong (mặc định: tắt, giữ workspace để duyệt Git diff)')
+  .option('--pack', 'Tự động đóng gói file EPUB sau khi xử lý xong (mặc định: tắt, giữ workspace để duyệt Git diff)', false)
   .option('--no-pack', 'Không đóng gói file EPUB (mặc định)')
   .option('--pack-only', 'Chỉ đóng gói thư mục workspace thành file EPUB (sau khi đã duyệt)', false)
+  .option('--reflow', 'Nối các dòng ngắt vụn thành đoạn văn (chỉ dùng cho text thô từ PDF, mặc định: tắt)', false)
   .option('--delay <ms>', 'Thời gian nghỉ giữa các chương (ms)', '2000');
 
 program.parse(process.argv);
@@ -224,6 +225,12 @@ async function main() {
   // 4. Lấy danh sách chương
   const allFiles = opfManager.getSpineChapterFiles();
   
+  // Tải bản đồ tiêu đề chuẩn từ Mục lục (nav.xhtml hoặc toc.ncx)
+  const tocTitleMap = TocBuilder.getTocMap(unpacked, opfManager);
+  if (tocTitleMap.size > 0) {
+    console.log(`   🧭 Đã tải ${tocTitleMap.size} tiêu đề chuẩn từ Mục lục (nav.xhtml/toc.ncx) làm căn cứ chuẩn hoá.`);
+  }
+
   // Lọc bỏ các file bìa, mục lục và trang thông tin ebook
   const contentChapters = allFiles.filter((ch) => {
     const name = ch.relativeHref.toLowerCase();
@@ -291,7 +298,20 @@ async function main() {
     console.log(`⏳ [${chapterNum}/${contentChapters.length}] Đang xử lý: ${ch.relativeHref}...`);
 
     const html = unpacked.getFileString(ch.zipPath);
-    const proc = new ChapterDomProcessor(html, ch.relativeHref);
+    const proc = new ChapterDomProcessor(html, ch.relativeHref, { reflowParagraphs: options.reflow });
+
+    // Xác định tiêu đề chuẩn theo nav.xhtml (nếu có)
+    const chFileName = ch.relativeHref.split('/').pop() || ch.relativeHref;
+    const basePrefixMatch = chFileName.match(/^(.*?_split_|\w+?)_?(?:split_)?\d+\.(?:x?html)$/i);
+    const basePrefix = basePrefixMatch ? basePrefixMatch[1] : undefined;
+    const baseIdMatch = chFileName.match(/^([a-zA-Z]+[0-9]+)/);
+    const baseId = baseIdMatch ? baseIdMatch[1] : undefined;
+
+    const officialTitle =
+      tocTitleMap.get(ch.relativeHref) ||
+      tocTitleMap.get(chFileName) ||
+      (basePrefix ? tocTitleMap.get(basePrefix) : undefined) ||
+      (baseId ? tocTitleMap.get(baseId) : undefined);
 
     // Kiểm tra xem chương này đã xử lý thành công ở lần chạy trước chưa
     if (!options.fresh && processedMap[ch.relativeHref]) {
@@ -312,18 +332,56 @@ async function main() {
     }
 
     const existingH2Count = proc.$('h2').length;
-    const prompt = buildChapterPrompt(pkg.metadata.title, ch.relativeHref, topElements, paragraphs, existingH2Count);
+    const prompt = buildChapterPrompt(pkg.metadata.title, ch.relativeHref, topElements, paragraphs, existingH2Count, officialTitle);
 
     try {
       const aiResult = await gemini.analyzeChapter(prompt);
 
-      console.log(`   ✅ H1 Chuẩn: "${aiResult.h1.title}"`);
-      if (aiResult.h1.removeTopIndices && aiResult.h1.removeTopIndices.length > 0) {
-        console.log(`      Dọn dẹp các thẻ top rác: index [${aiResult.h1.removeTopIndices.join(', ')}]`);
-      }
+      // 1. Xác định xem file này có phải là file phần sau (continuation split) của cùng một chương dài hay không.
+      // Một file CHỈ ĐƯỢC COI LÀ continuation split khi thỏa mãn ĐỒNG THỜI các điều kiện:
+      //  a) KHÔNG có tiêu đề chính thức trong Mục lục (officialTitle không tồn tại).
+      //  b) KHÔNG có thẻ <h1> sẵn trong file (proc.$('h1').length === 0).
+      //  c) Các đoạn đầu trang không chứa từ khoá chương/phần (CHAPTER_REGEX).
+      //  d) Tên file có dạng phân mảnh của một chương cụ thể (ví dụ: chapter0002_split_001.html),
+      //     trong đó tiền tố KHÔNG PHẢI là tiền tố chung toàn sách (index, part, split, text, content, section).
+      //  e) File gốc split_000 của chương đó thực sự tồn tại trong sách và đã có H1.
+      const splitMatch = chFileName.match(/^([a-zA-Z0-9_-]+?)_split_(00[1-9]|0[1-9]\d|[1-9]\d+)\.(?:x?html)$/i);
+      const splitPrefix = splitMatch ? splitMatch[1] : '';
+      const isGenericSplitPrefix = /^(?:index|part|split|text|content|section|body)$/i.test(splitPrefix);
+      const companion000Name = splitPrefix ? `${splitPrefix}_split_000.${chFileName.split('.').pop()}` : '';
+      const companion000ZipPath = companion000Name ? path.posix.join(path.posix.dirname(ch.zipPath), companion000Name) : '';
 
-      // Chuẩn hoá H1 vào DOM
-      proc.normalizeH1(aiResult.h1.title, aiResult.h1.removeTopIndices);
+      const hasExistingH1 = proc.$('h1').length > 0;
+      const topText = topElements.map((e) => e.text).join(' ');
+      const hasChapterKeywords = CHAPTER_REGEX.test(topText);
+
+      const isTrueContinuationSplit =
+        !officialTitle &&
+        !hasExistingH1 &&
+        !hasChapterKeywords &&
+        Boolean(splitMatch) &&
+        !isGenericSplitPrefix &&
+        unpacked.hasFile(companion000ZipPath);
+
+      if (isTrueContinuationSplit) {
+        console.log(`   ℹ️ File này là phần nối tiếp của ${companion000Name}. Giữ nguyên thân bài và không chèn H1 lặp lại.`);
+        // Dọn dẹp H1 rác nhân tạo do AI từng chèn nhầm nếu có (chỉ thẻ mang class chapter-h1)
+        if (proc.$('h1.chapter-h1').length > 0) {
+          proc.$('h1.chapter-h1').remove();
+        }
+      } else {
+        // Tiêu đề H1: Ưu tiên theo Mục lục (nav.xhtml/toc.ncx) -> H1 sẵn có trong file -> AI gợi ý
+        const existingH1Text = proc.$('h1').first().text().replace(/\s+/g, ' ').trim();
+        const targetH1 = officialTitle || (existingH1Text && existingH1Text.length < 150 ? existingH1Text : aiResult.h1.title);
+
+        console.log(`   ✅ H1 Chuẩn: "${targetH1}"${officialTitle ? ' (Đồng bộ theo nav.xhtml)' : ''}`);
+        if (aiResult.h1.removeTopIndices && aiResult.h1.removeTopIndices.length > 0) {
+          console.log(`      Dọn dẹp các thẻ top rác: index [${aiResult.h1.removeTopIndices.join(', ')}]`);
+        }
+
+        // Chuẩn hoá H1 vào DOM
+        proc.normalizeH1(targetH1, aiResult.h1.removeTopIndices, undefined, pkg.metadata.title);
+      }
 
       // Chèn H2 và H3
       if (aiResult.headings.length > 0) {
@@ -363,16 +421,14 @@ async function main() {
       const chapterHeadings = proc.collectHeadings();
       allHeadings.push(...chapterHeadings);
 
-      // Đánh dấu chương đã hoàn tất thành công để không bao giờ chạy lại lãng phí quota
-      processedMap[ch.relativeHref] = true;
-      try {
-        fs.writeFileSync(progressFilePath, JSON.stringify(processedMap, null, 2), 'utf-8');
-      } catch {
-        // ignore
-      }
-
-      // Lưu lại XHTML trực tiếp vào file trên đĩa
+      // Lưu lại XHTML trực tiếp vào file trên đĩa và đánh dấu checkpoint tiến trình
       if (!options.dryRun) {
+        processedMap[ch.relativeHref] = true;
+        try {
+          fs.writeFileSync(progressFilePath, JSON.stringify(processedMap, null, 2), 'utf-8');
+        } catch {
+          // ignore
+        }
         unpacked.setFileString(ch.zipPath, proc.serialize());
       }
     } catch (err: any) {
@@ -426,54 +482,70 @@ async function main() {
     console.log(`   📊 Tổng kết chú thích: ${fnReport.validPairs} cặp liên kết hợp lệ | Lỗi còn lại: ${fnReport.issues.length} | Pop-up: ${fnReport.isEpub3PopupReady ? '✅ Sẵn sàng' : 'Chưa'}`);
   }
 
-  // 7. Xây dựng lại Table of Contents (TOC)
-  console.log(`\n[4/5] Đang tái tạo Table of Contents (Mục lục đa cấp)...`);
+  // 7. Bảo tồn và Đồng bộ Table of Contents (TOC)
+  console.log(`\n[4/5] Đang kiểm tra & bảo tồn Table of Contents (nav.xhtml, toc.ncx)...`);
   
-  // Thu thập toàn bộ headings từ tất cả các file nội dung trong sách (đảm bảo không bị thiếu chương hay trang mục lục/nội dung)
-  const fullBookHeadings: HeadingItem[] = [];
-  const tocCandidateFiles = allFiles.filter((ch) => {
-    const name = ch.relativeHref.toLowerCase();
-    if (name.includes('titlepage') || name.includes('cover')) return false;
-    if (name === 'nav.xhtml' || name.endsWith('/nav.xhtml')) return false;
-
-    try {
-      const html = unpacked.getFileString(ch.zipPath);
-      if (FootnoteProcessor.isFootnoteFile(html, ch.relativeHref)) return false;
-      const hasImg = html.includes('<img') || html.includes('<image');
-      const hasText = html.includes('<p') || html.includes('<div') || html.includes('<h1');
-      if (hasImg && !hasText) return false;
-      return true;
-    } catch {
-      return true;
-    }
-  });
-
-  for (const ch of tocCandidateFiles) {
-    if (!unpacked.hasFile(ch.zipPath)) continue;
-    const html = unpacked.getFileString(ch.zipPath);
-    const proc = new ChapterDomProcessor(html, ch.relativeHref);
-    fullBookHeadings.push(...proc.collectHeadings());
-  }
-
-  const tocTree = TocBuilder.buildTree(fullBookHeadings);
-  console.log(`   - Tổng số mục trong cây TOC: ${fullBookHeadings.length} mục (gồm cả H1, H2, H3)`);
-
-  const bookUid = pkg.metadata.identifier || `urn:uuid:${Math.random().toString(36).substring(2)}`;
-
-  // Tạo file toc.ncx (EPUB 2)
-  const ncxContent = TocBuilder.generateNcx(tocTree, pkg.metadata.title, bookUid);
-  const ncxPath = pkg.tocHref ? opfManager.resolvePathInZip(pkg.tocHref) : 'toc.ncx';
-  unpacked.setFileString(ncxPath, ncxContent);
-  console.log(`   - Đã cập nhật: ${ncxPath} (EPUB 2 NCX)`);
-
-  // Tạo file nav.xhtml (EPUB 3)
-  const navContent = TocBuilder.generateNavXhtml(tocTree, pkg.metadata.title);
   const navRelativeHref = 'nav.xhtml';
   const navZipPath = opfManager.resolvePathInZip(navRelativeHref);
-  unpacked.setFileString(navZipPath, navContent);
-  opfManager.ensureManifestItem('nav', navRelativeHref, 'application/xhtml+xml', 'nav');
-  opfManager.save();
-  console.log(`   - Đã sinh mới & thêm vào manifest: ${navZipPath} (EPUB 3 Navigation Document)`);
+  const hasExistingNav = unpacked.hasFile(navZipPath) || unpacked.hasFile('nav.xhtml');
+  const hasExistingNcx = (pkg.tocHref && unpacked.hasFile(opfManager.resolvePathInZip(pkg.tocHref))) || unpacked.hasFile('toc.ncx') || unpacked.hasFile('OEBPS/toc.ncx');
+
+  let tocTree: HeadingItem[] = [];
+
+  if (hasExistingNav || hasExistingNcx) {
+    console.log(`   🛡️ Bảo tồn Mục lục chuẩn theo nav.xhtml/toc.ncx và đồng bộ hai chiều...`);
+    const syncRes = TocBuilder.preserveAndSyncToc(unpacked, opfManager, pkg.metadata.title);
+    console.log(`   ✅ Đã bảo tồn và đồng bộ ${syncRes.totalHeadings} mục tiêu đề vào mục lục.`);
+
+    if (unpacked.hasFile(navZipPath)) {
+      tocTree = TocBuilder.parseNavXhtmlToTree(unpacked.getFileString(navZipPath));
+    }
+  } else {
+    // Thu thập toàn bộ headings từ tất cả các file nội dung trong sách nếu sách chưa hề có mục lục nào
+    const fullBookHeadings: HeadingItem[] = [];
+    const tocCandidateFiles = allFiles.filter((ch) => {
+      const name = ch.relativeHref.toLowerCase();
+      if (name.includes('titlepage') || name.includes('cover')) return false;
+      if (name === 'nav.xhtml' || name.endsWith('/nav.xhtml')) return false;
+
+      try {
+        const html = unpacked.getFileString(ch.zipPath);
+        if (isTableOfContentsFile(html, ch.relativeHref)) return false;
+        if (FootnoteProcessor.isFootnoteFile(html, ch.relativeHref)) return false;
+        const hasImg = html.includes('<img') || html.includes('<image');
+        const hasText = html.includes('<p') || html.includes('<div') || html.includes('<h1');
+        if (hasImg && !hasText) return false;
+        return true;
+      } catch {
+        return true;
+      }
+    });
+
+    for (const ch of tocCandidateFiles) {
+      if (!unpacked.hasFile(ch.zipPath)) continue;
+      const html = unpacked.getFileString(ch.zipPath);
+      const proc = new ChapterDomProcessor(html, ch.relativeHref, { reflowParagraphs: options.reflow });
+      fullBookHeadings.push(...proc.collectHeadings());
+    }
+
+    tocTree = TocBuilder.buildTree(fullBookHeadings);
+    console.log(`   - Tổng số mục trong cây TOC: ${fullBookHeadings.length} mục (gồm cả H1, H2, H3)`);
+
+    const bookUid = pkg.metadata.identifier || `urn:uuid:${Math.random().toString(36).substring(2)}`;
+
+    // Tạo file toc.ncx (EPUB 2)
+    const ncxContent = TocBuilder.generateNcx(tocTree, pkg.metadata.title, bookUid);
+    const ncxPath = pkg.tocHref ? opfManager.resolvePathInZip(pkg.tocHref) : 'toc.ncx';
+    unpacked.setFileString(ncxPath, ncxContent);
+    console.log(`   - Đã cập nhật: ${ncxPath} (EPUB 2 NCX)`);
+
+    // Tạo file nav.xhtml (EPUB 3)
+    const navContent = TocBuilder.generateNavXhtml(tocTree, pkg.metadata.title);
+    unpacked.setFileString(navZipPath, navContent);
+    opfManager.ensureManifestItem('nav', navRelativeHref, 'application/xhtml+xml', 'nav');
+    opfManager.save();
+    console.log(`   - Đã sinh mới & thêm vào manifest: ${navZipPath} (EPUB 3 Navigation Document)`);
+  }
 
   // Cập nhật các trang Mục lục nội dung đọc trực tiếp trong sách (Inline TOC như part0001.html, part0014.html, index_split_003.html)
   const allWorkspaceFiles = unpacked.listFiles();
