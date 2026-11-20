@@ -260,7 +260,7 @@ Khác với các công cụ thông thường gộp chung OCR và AI biên tập 
    - ⚡ **Không gọi Gemini AI:** Chạy cực nhanh, không tiêu tốn quota API.
    - 🔒 **Bảo toàn 100% chữ nghĩa gốc:** Chưa sửa chính tả, chưa chèn heading H2/H3 phỏng đoán.
    - 📸 **Hỗ trợ Scan PDF:** Kích hoạt Apple Vision OCR native trên macOS (ngôn ngữ `vi-VT`) với độ chính xác cao và tốc độ vượt trội.
-   - 📑 **Hỗ trợ Docs PDF:** Trích xuất text vector layer và toạ độ font qua PDF.js.
+   - 📑 **Hỗ trợ Docs PDF:** Trích xuất text, font và toạ độ qua PDF.js. Cấu trúc sách lấy trực tiếp từ bookmark hoặc link trong trang mục lục (Phần/Chương/Tiết ➔ H1/H2/H3, mỗi mục lục một file), đoạn văn dựng theo thụt đầu dòng, giữ in đậm/nghiêng, và in báo cáo đối soát số tiêu đề, số từ sau mỗi lần chạy.
    - 🧹 **Lọc rác trang thông minh:** Tự động phát hiện và loại bỏ running headers, running footers, và các định dạng số trang lặp lại ở đầu/chân trang.
    - 🧩 **Smart Paragraph Reflow:** Tự động nối các từ bị đứt quãng bởi dấu gạch nối cuối dòng (`nông-` + `nghiệp` ➔ `nông nghiệp`), nối các dòng trong cùng một đoạn văn thành một khối `<p>` liền mạch và giữ ngắt đoạn tự nhiên khi hết câu.
    - 🏷️ **Nhận diện tiêu đề chương tự nhiên (H1):** Thuật toán tự động phát hiện các dòng tiêu đề chương/phần (theo pattern *Chương*, *Phần*, *Tựa*, *Lời mở đầu*, số La Mã *I.*, *II.*...) để phân tách thành các file `part0001.xhtml`, `part0002.xhtml`... trong workspace.
@@ -375,6 +375,8 @@ pnpm run pack
 | `-d, --dir <path>` | Thư mục workspace xuất bản | `./workspace` |
 | `-o, --output <path>` | Đường dẫn file EPUB thô xuất xưởng (nếu muốn đóng gói ngay) | `<tên_gốc>_raw.epub` trong `output/` |
 | `-c, --cover <path>` | Đường dẫn ảnh bìa ngoài (thay thế nếu bìa scan bị mờ) | Tự động trích xuất trang 1 của PDF |
+| `--title <text>` | Tên sách | Metadata PDF, trang tên sách, hoặc tên file |
+| `--author <text>` | Tác giả | Trang tên sách |
 | `--start <number>` | Bắt đầu trích xuất từ trang thứ mấy (1-based) | `1` |
 | `--limit <number>` | Giới hạn số trang trích xuất (để kiểm thử nhanh) | Toàn bộ số trang |
 | `--pack` | Tự động đóng gói file EPUB thô sau khi hoàn thành workspace | `false` |

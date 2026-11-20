@@ -1,4 +1,4 @@
-import type { PdfExtractedPage, PdfLineItem, PdfBatchChunk, PdfTocStructure, PdfTocItem } from './types.js';
+import type { PdfExtractedPage, PdfExtractedImage, PdfLineItem, PdfBatchChunk, PdfTocStructure, PdfTocItem } from './types.js';
 import { calculateTextSimilarity, normalizeTextForMatching } from './tocParser.js';
 
 export interface ReflowOptions {
@@ -73,7 +73,7 @@ export function removeHeadersAndFooters(
   };
 
   // Pattern nhận diện số trang độc lập dạng: "Trang 12", "12", "- 12 -", "Page 12", "12 / 150"
-  const PAGE_NUMBER_REGEX = /^(?:trang\s*|\-|\bpage\s*)?\d+(?:\s*\/\s*\d+)?(?:\s*\-)?$/i;
+  const PAGE_NUMBER_REGEX = /^(?:trang\s*|\-|\bpage\s*)?\d+(?:\s*\/\s*\d+)?(?:\s*\-)?\.?$/i;
 
   return pages.map((page) => {
     const cleanedLines: PdfLineItem[] = [];
@@ -443,6 +443,135 @@ export function detectChapterHeaderOnPage(lines: PdfLineItem[]): { title: string
   return null;
 }
 
+// Token tạm đánh dấu vị trí tham chiếu chú thích trong text (Private Use Area, không đụng chạm escapeHtml)
+const FN_TOKEN_OPEN = '\uE000';
+const FN_TOKEN_CLOSE = '\uE001';
+const FN_TOKEN_REGEX = /\uE000(\d+)\uE001/g;
+
+// Dòng mở đầu một chú thích cuối trang: "(1) Nội dung..."
+const FOOTNOTE_START_REGEX = /^\(\s*\d{1,2}\s*\)\s*(?=\S)/;
+
+// Dấu tham chiếu (chỉ số trên) trong thân bài sau OCR, luôn dính liền sau chữ/dấu câu. Ba dạng:
+//  - "(1)"            : nhóm 1
+//  - "1", "12", "234" : chữ số dính liền (chỉ số trên bị OCR thành chữ thường); nhóm 2
+//  - "(\"", "('"       : chỉ số trên bị OCR hỏng, chỉ còn dấu ngoặc + ký tự lạ; nhóm 3
+const BODY_MARKER_REGEX =
+  /(?<=[\p{L}.,;:!?…”"'’)\]*])(?:\(\s*(\d{1,2})\s*\)|(\d{1,3})|(\(\s*["'”“’`!|lI]\s*\)?))(?=[\s.,;:!?…”"')\]]|$)/gu;
+
+export interface PageFootnote {
+  num: string;
+  text: string;
+}
+
+export interface PageFootnoteSplit {
+  body: PdfLineItem[];
+  notes: PageFootnote[];
+}
+
+/**
+ * Tách khối chú thích ở đáy trang (đánh số lại từ (1) trên mỗi trang) khỏi thân bài.
+ * Khối chú thích bắt đầu ở dòng "(N) ..." nằm ở nửa dưới trang, chữ nhỏ hơn thân bài.
+ */
+export function splitPageFootnotes(lines: PdfLineItem[]): PageFootnoteSplit {
+  const heights = lines
+    .filter((l) => l.bbox && l.bbox.y > 0.1 && l.bbox.y < 0.9 && l.text.length > 20)
+    .map((l) => l.bbox!.h)
+    .sort((a, b) => a - b);
+  const medianH = heights.length > 0 ? heights[Math.floor(heights.length / 2)] : 0;
+
+  let start = -1;
+  for (let i = 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.bbox || l.bbox.y >= 0.4) continue;
+    if (!FOOTNOTE_START_REGEX.test(l.text.trim())) continue;
+    // Chữ cỡ thân bài: chỉ nhận nếu nằm thấp trang và tách khỏi thân bài bằng khoảng trống rõ rệt
+    // (tránh nhầm với liệt kê "(1)..." trong nội dung)
+    if (medianH > 0 && l.bbox.h >= medianH * 0.95) {
+      const prev = lines[i - 1].bbox;
+      const gap = prev ? prev.y - (l.bbox.y + l.bbox.h) : 0;
+      if (!(l.bbox.y < 0.3 && gap >= 0.03)) continue;
+    }
+    start = i;
+    break;
+  }
+  if (start === -1) return { body: lines, notes: [] };
+
+  const notes: PageFootnote[] = [];
+  for (const l of lines.slice(start)) {
+    const t = l.text.trim();
+    if (!t) continue;
+    if (FOOTNOTE_START_REGEX.test(t)) {
+      const num = t.match(/\d+/)![0];
+      notes.push({ num, text: t.replace(FOOTNOTE_START_REGEX, '').trim() });
+    } else if (notes.length > 0) {
+      const prev = notes[notes.length - 1];
+      prev.text = /[-–]$/.test(prev.text) ? prev.text.slice(0, -1) + t : `${prev.text} ${t}`;
+    }
+  }
+  return { body: lines.slice(0, start), notes };
+}
+
+/**
+ * Gắn mỗi chú thích của trang vào dấu tham chiếu trong thân bài (theo thứ tự xuất hiện).
+ * Dấu nào OCR làm mất thì chú thích được gắn vào cuối dòng thân bài cuối cùng của trang.
+ */
+export function linkFootnotesIntoBody(
+  body: PdfLineItem[],
+  notes: { id: number; num: string }[]
+): { lines: PdfLineItem[]; matched: number } {
+  const lines = body.map((l) => ({ ...l }));
+  const token = (id: number) => `${FN_TOKEN_OPEN}${id}${FN_TOKEN_CLOSE}`;
+  let next = 0;
+
+  for (const line of lines) {
+    if (next >= notes.length) break;
+    line.text = line.text.replace(BODY_MARKER_REGEX, (m, paren?: string, digits?: string, garbled?: string) => {
+      if (next >= notes.length) return m;
+      if (garbled) return token(notes[next++].id);
+      if (paren !== undefined) {
+        return paren === notes[next].num ? token(notes[next++].id) : m;
+      }
+      // Chuỗi chữ số dính liền: tách tuần tự theo số thứ tự chú thích đang chờ ("12" -> chú thích 1 rồi 2)
+      let rest = digits || '';
+      let out = '';
+      let cursor = next;
+      while (rest.length > 0 && cursor < notes.length && rest.startsWith(notes[cursor].num)) {
+        rest = rest.slice(notes[cursor].num.length);
+        out += token(notes[cursor++].id);
+      }
+      if (rest.length > 0 || cursor === next) return m; // không khớp trọn vẹn: không phải dấu chú thích
+      next = cursor;
+      return out;
+    });
+  }
+
+  const matched = next;
+  if (next < notes.length && lines.length > 0) {
+    // Dấu bị mất hẳn khi OCR (Vision thường bỏ chỉ số trên nhỏ): gắn vào cuối câu hoàn chỉnh cuối cùng
+    // của trang để không mất chú thích và không rơi giữa câu. Không có thì dùng dòng cuối.
+    const plain = (t: string) => t.replace(FN_TOKEN_REGEX, '').trim();
+    let target = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (/[.!?…”"»)]$/.test(plain(lines[i].text))) {
+        target = i;
+        break;
+      }
+    }
+    if (target === -1) {
+      // Tránh dính vào dòng tiêu đề ngắn (token trên tiêu đề sẽ bị loại khi dựng <h2>)
+      target = lines.length - 1;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (plain(lines[i].text).length >= 40) {
+          target = i;
+          break;
+        }
+      }
+    }
+    lines[target].text += notes.slice(next).map((n) => token(n.id)).join('');
+  }
+  return { lines, matched };
+}
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -504,13 +633,28 @@ export function convertPagesToCleanHtml(
     currentChapterBlocks = [];
   };
 
+  const footnoteStore = new Map<number, string>();
+  let footnoteSeq = 0;
+
   for (let i = 0; i < pages.length; i++) {
-    const page = pages[i];
+    let page = pages[i];
     if (page.lines.length === 0 && (!page.images || page.images.length === 0)) continue;
 
     // Bỏ qua các trang thuộc Mục Lục để không trích xuất trùng lặp vào sách
     if (tocPageSet.has(page.pageNumber)) {
       continue;
+    }
+
+    // Tách chú thích cuối trang ra khỏi thân bài để đoạn văn nối liền qua ngắt trang
+    if (!tocPageSet.has(page.pageNumber)) {
+      const split = splitPageFootnotes(page.lines);
+      if (split.notes.length > 0) {
+        const withIds = split.notes.map((n) => {
+          footnoteStore.set(++footnoteSeq, n.text);
+          return { id: footnoteSeq, num: n.num };
+        });
+        page = { ...page, lines: linkFootnotesIntoBody(split.body, withIds).lines };
+      }
     }
 
     let detection: { title: string; consumedCount: number } | null = null;
@@ -580,35 +724,35 @@ export function convertPagesToCleanHtml(
 
     const remainingLines = detection ? page.lines.slice(detection.consumedCount) : page.lines;
 
-    if (page.isPhotoPlate) {
-      // Đối với trang album ảnh (photo plate):
-      flushBufferedLines();
-      if (page.images && page.images.length > 0) {
-        for (const img of page.images) {
-          currentChapterBlocks.push({
-            text: '',
-            isHeading: false,
-            image: {
-              src: `images/${img.fileName}`,
-              alt: img.alt || `Khoảnh khắc và cuộc đời (Trang ${page.pageNumber})`
-            }
-          });
-        }
-      }
-      // Không nạp remainingLines từ photo plate để tránh nhiễu OCR trên áp phích/tường trong ảnh
-    } else {
+    // Trộn dòng chữ và ảnh theo toạ độ y (từ trên xuống) để ảnh nằm đúng chỗ giữa các đoạn.
+    // Ảnh dùng cạnh trên làm khoá: dòng nằm trên ảnh có tâm cao hơn cạnh trên đó.
+    const pageImages = page.images || [];
+    if (pageImages.length === 0) {
       bufferedLines.push(...remainingLines);
-
-      // Nếu trang thông thường có hình ảnh chèn giữa nội dung
-      if (page.images && page.images.length > 0) {
-        flushBufferedLines();
-        for (const img of page.images) {
+    } else {
+      type Item = { key: number; line?: PdfLineItem; image?: PdfExtractedImage };
+      const items: Item[] = [
+        ...remainingLines.map((line, i) => ({
+          key: line.bbox ? line.bbox.y + line.bbox.h / 2 : 1 - i / Math.max(1, remainingLines.length),
+          line
+        })),
+        ...pageImages.map((image) => ({
+          key: image.bbox ? image.bbox.y + image.bbox.h : 0,
+          image
+        }))
+      ];
+      items.sort((a, b) => b.key - a.key);
+      for (const it of items) {
+        if (it.line) {
+          bufferedLines.push(it.line);
+        } else if (it.image) {
+          flushBufferedLines();
           currentChapterBlocks.push({
             text: '',
             isHeading: false,
             image: {
-              src: `images/${img.fileName}`,
-              alt: img.alt || `Hình ảnh minh hoạ (Trang ${page.pageNumber})`
+              src: `images/${it.image.fileName}`,
+              alt: it.image.alt || `Hình minh hoạ (Trang ${page.pageNumber})`
             }
           });
         }
@@ -619,7 +763,20 @@ export function convertPagesToCleanHtml(
   finalizeChapter();
 
   // Dựng HTML từ danh sách chương đã phân tách
+  const renderedNotes = new Set<number>();
   const sectionsHtml = chapters.map((ch) => {
+    // Đánh số chú thích liên tục theo chương, theo thứ tự xuất hiện trong thân bài
+    const chapterNotes: { id: number; num: number }[] = [];
+    const renderText = (text: string) =>
+      escapeHtml(text).replace(FN_TOKEN_REGEX, (_m, idStr: string) => {
+        const id = Number(idStr);
+        if (!footnoteStore.has(id)) return '';
+        const num = chapterNotes.length + 1;
+        chapterNotes.push({ id, num });
+        renderedNotes.add(id);
+        return `<a id="fnref_${id}" href="#fn_${id}" epub:type="noteref" role="doc-noteref" class="noteref"><sup>[${num}]</sup></a>`;
+      });
+
     const blocksHtml = ch.blocks
       .map((b) => {
         if (b.image) {
@@ -628,16 +785,27 @@ export function convertPagesToCleanHtml(
         }
         if (b.isHeading) {
           const title = b.headingTitle || b.text;
-          return `<h2>${escapeHtml(title)}</h2>`;
+          return `<h2>${escapeHtml(title.replace(FN_TOKEN_REGEX, ''))}</h2>`;
         }
         if (!b.text.trim()) return '';
-        return `<p>${escapeHtml(b.text)}</p>`;
+        return `<p>${renderText(b.text)}</p>`;
       })
       .filter(Boolean)
       .join('\n');
-    return `<section>\n<h1>${escapeHtml(ch.title)}</h1>\n${blocksHtml}\n</section>`;
+
+    const asidesHtml = chapterNotes
+      .map(({ id, num }) =>
+        `<aside id="fn_${id}" class="chapter-footnote" epub:type="footnote" role="doc-footnote">\n  <p><a href="#fnref_${id}" class="footnote-backlink"><sup>[${num}]</sup></a> ${escapeHtml(footnoteStore.get(id) || '')}</p>\n</aside>`
+      )
+      .join('\n');
+    const notesSection = asidesHtml ? `\n<div class="chapter-footnotes-section">\n${asidesHtml}\n</div>` : '';
+
+    return `<section>\n<h1>${escapeHtml(ch.title)}</h1>\n${blocksHtml}${notesSection}\n</section>`;
   });
 
+  if (renderedNotes.size !== footnoteStore.size) {
+    console.warn(`⚠️ Chú thích: phát hiện ${footnoteStore.size}, xuất ra ${renderedNotes.size} (${footnoteStore.size - renderedNotes.size} chú thích không có vị trí tham chiếu)`);
+  }
   return sectionsHtml.join('\n\n');
 }
 

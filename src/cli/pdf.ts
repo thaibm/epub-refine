@@ -9,8 +9,12 @@ import { parseDigitalPdf } from '../pdf/digitalPdfParser.js';
 import { detectAndParsePdfToc } from '../pdf/tocParser.js';
 import { removeHeadersAndFooters, convertPagesToCleanHtml } from '../pdf/layoutReflow.js';
 import { splitHtmlIntoChapters, buildEpubWorkspace } from '../pdf/pdfToWorkspace.js';
+import type { ChapterDraft } from '../pdf/pdfToWorkspace.js';
+import { buildDigitalNavigation } from '../pdf/digitalNavigation.js';
+import { structureDigitalBook } from '../pdf/digitalStructure.js';
+import type { DigitalStructureReport } from '../pdf/digitalStructure.js';
 import { packEpubFromDir } from '../core/epubArchive.js';
-import type { PdfExtractionResult } from '../pdf/types.js';
+import type { PdfDigitalExtraction, PdfDigitalNavigation, PdfExtractionResult } from '../pdf/types.js';
 
 dotenv.config();
 
@@ -24,6 +28,8 @@ program
   .option('-d, --dir <path>', 'Thư mục workspace xuất bản', './workspace')
   .option('-o, --output <path>', 'Đường dẫn file EPUB xuất xưởng (nếu muốn đóng gói ngay)')
   .option('-c, --cover <path>', 'Đường dẫn ảnh bìa ngoài (nếu bìa scan mờ hoặc muốn thay thế)')
+  .option('--title <text>', 'Tên sách (mặc định lấy từ metadata hoặc trang tên sách)')
+  .option('--author <text>', 'Tác giả (mặc định lấy từ trang tên sách)')
   .option('--start <number>', 'Bắt đầu từ trang thứ mấy (1-based)')
   .option('--limit <number>', 'Giới hạn số trang xử lý (để kiểm thử nhanh)')
   .option('--pack', 'Tự động đóng gói file EPUB thô sau khi hoàn thành workspace', false);
@@ -66,7 +72,9 @@ async function main() {
     ? path.resolve(options.cover)
     : path.join(scratchDir, `cover_${selectedPdf.baseName}.jpg`);
   const imagesTempDir = path.join(scratchDir, `extracted_images_${selectedPdf.baseName}`);
-  if (!fs.existsSync(imagesTempDir)) fs.mkdirSync(imagesTempDir, { recursive: true });
+  // Dọn sạch ảnh của các lần chạy trước: nếu không, ảnh cũ (kể cả từ phiên bản lỗi) sẽ bị copy vào workspace và manifest
+  fs.rmSync(imagesTempDir, { recursive: true, force: true });
+  fs.mkdirSync(imagesTempDir, { recursive: true });
 
   // 2. Trích xuất Text & Hình ảnh
   let extraction: PdfExtractionResult;
@@ -92,9 +100,6 @@ async function main() {
     console.log(`\n⚡ [2/4] Đang trích xuất text streams và toạ độ font qua PDF.js...`);
     let lastProgress = 0;
     extraction = await parseDigitalPdf(pdfPath, {
-      startPage,
-      endPage,
-      extractCoverPath: options.cover ? undefined : coverTempPath,
       onProgress(current, total) {
         const percent = Math.round((current / total) * 100);
         if (percent >= lastProgress + 10 || current === total) {
@@ -110,39 +115,66 @@ async function main() {
     .replace(/[-_.]+/g, ' ')
     .replace(/\b\w/g, (c) => c.toUpperCase());
 
-  // 2.5. Nhận diện Mục Lục (TOC Anchor Engine)
-  console.log(`\n📑 [2.5/4] Đang quét tìm và phân tích cấu trúc Mục lục trong tài liệu PDF...`);
-  const toc = detectAndParsePdfToc(extraction.pages);
-  if (toc.hasToc) {
-    console.log(`   ✅ Đã nhận diện Mục lục (trang ${toc.tocPageNumbers.join(', ')}):`);
-    console.log(`      + ${toc.majorChapters.length} Chương chính (H1)`);
-    console.log(`      + ${toc.subSections.length} Tiểu mục (H2)`);
-  } else {
-    console.log(`   ℹ️ Không tìm thấy trang Mục lục riêng biệt, áp dụng thuật toán phân tách cấu trúc tự thân.`);
+  let chapters: ChapterDraft[] | undefined;
+  let finalTitle: string = options.title || bookTitle;
+  let finalAuthor: string | undefined = options.author;
+
+  // Luồng PDF số: dựng cấu trúc theo bookmark/link của chính tài liệu
+  if (classification.type === 'digital') {
+    const digital = extraction as PdfDigitalExtraction;
+    console.log(`\n📑 [2.5/4] Đang đọc cấu trúc mục lục (bookmark, link, mục lục in)...`);
+    const navigation = buildDigitalNavigation(digital);
+
+    if (navigation.source !== 'none') {
+      console.log(`   ✅ Nguồn mục lục: ${navigation.source} (${navigation.entries.length} mục)`);
+      console.log(`\n🧹 [3/4] Đang lọc lề trang, dựng đoạn văn và tách theo mục lục...`);
+      const result = structureDigitalBook(digital, navigation, { startPage, endPage, fallbackTitle: bookTitle });
+
+      chapters = result.chapters;
+      finalTitle = options.title || result.metadata.title;
+      finalAuthor = options.author || result.metadata.author;
+
+      if (result.hasCoverPage && !options.cover) {
+        await extractDigitalCover(pdfPath, coverTempPath);
+      }
+      printDigitalReport(result.report, navigation, scratchDir, selectedPdf.baseName);
+    } else {
+      console.log(`   ℹ️ Tài liệu không có bookmark, link hay mục lục in, dùng thuật toán tách chương theo nội dung.`);
+      extraction = { ...extraction, pages: extraction.pages.filter((p) => p.pageNumber >= startPage && p.pageNumber <= endPage) };
+    }
   }
 
-  // 3. Layout Reflow & Lọc Header/Footer/Số trang
-  console.log(`\n🧹 [3/4] Đang lọc bỏ running headers, running footers, số trang và reflow đoạn văn...`);
-  const cleanedPages = removeHeadersAndFooters(extraction.pages, {
-    bookTitle,
-    toc
-  });
+  // Luồng sách scan, hoặc PDF số không có mục lục
+  if (!chapters) {
+    console.log(`\n📑 [2.5/4] Đang quét tìm và phân tích cấu trúc Mục lục trong tài liệu PDF...`);
+    const toc = detectAndParsePdfToc(extraction.pages);
+    if (toc.hasToc) {
+      console.log(`   ✅ Đã nhận diện Mục lục (trang ${toc.tocPageNumbers.join(', ')}):`);
+      console.log(`      + ${toc.majorChapters.length} Chương chính (H1)`);
+      console.log(`      + ${toc.subSections.length} Tiểu mục (H2)`);
+    } else {
+      console.log(`   ℹ️ Không tìm thấy trang Mục lục riêng biệt, áp dụng thuật toán phân tách cấu trúc tự thân.`);
+    }
 
-  // Cấu trúc hoá văn bản thuần túy (dùng TOC Anchor nếu có)
-  const fullStructuredHtml = convertPagesToCleanHtml(cleanedPages, bookTitle, toc);
+    console.log(`\n🧹 [3/4] Đang lọc bỏ running headers, running footers, số trang và reflow đoạn văn...`);
+    const cleanedPages = removeHeadersAndFooters(extraction.pages, { bookTitle, toc });
+    const fullStructuredHtml = convertPagesToCleanHtml(cleanedPages, bookTitle, toc);
+    chapters = splitHtmlIntoChapters(fullStructuredHtml, bookTitle);
+  }
 
-  // 4. Cắt chương và dựng EPUB Workspace
-  console.log(`\n📚 [4/4] Đang phân tách chương và khởi tạo cấu trúc EPUB chuẩn vào workspace...`);
-  const chapters = splitHtmlIntoChapters(fullStructuredHtml, bookTitle);
-  console.log(`   📑 Đã nhận diện: ${chapters.length} chương/phần nội dung thô:`);
+  // 4. Dựng EPUB Workspace
+  console.log(`\n📚 [4/4] Đang khởi tạo cấu trúc EPUB chuẩn vào workspace...`);
+  console.log(`   📖 Tên sách: ${finalTitle}${finalAuthor ? ` | Tác giả: ${finalAuthor}` : ''}`);
+  console.log(`   📑 Đã tạo: ${chapters.length} file nội dung:`);
   for (const ch of chapters) {
-    console.log(`      - [${ch.id}] ${ch.title}`);
+    console.log(`      - [${ch.id}] ${'  '.repeat(ch.level - 1)}${ch.title}`);
   }
 
   const finalCoverImage = fs.existsSync(coverTempPath) ? coverTempPath : options.cover;
 
   await buildEpubWorkspace(chapters, {
-    bookTitle,
+    bookTitle: finalTitle,
+    author: finalAuthor,
     sourcePdfPath: pdfPath,
     coverImagePath: finalCoverImage,
     backCoverImagePath: extraction.backCoverImagePath,
@@ -154,7 +186,7 @@ async function main() {
   console.log(`\n======================================================`);
   console.log(`🎉 HOÀN THÀNH TRÍCH XUẤT NỘI DUNG TỪ PDF!`);
   console.log(`   - File nguồn: ${selectedPdf.fileName}`);
-  console.log(`   - Số trang đã xử lý: ${extraction.pages.length}`);
+  console.log(`   - Số trang đã xử lý: ${endPage - startPage + 1}`);
   console.log(`   - Số chương/phần đã tạo: ${chapters.length}`);
   console.log(`   - Thư mục lưu trữ: ${workspaceDir}`);
   console.log(`   🌱 Git repository riêng đã được tạo với commit gốc: "Original PDF extracted content"`);
@@ -180,6 +212,39 @@ async function main() {
   console.log(``);
   console.log(`   Sau khi AI chạy xong, bạn có thể kiểm tra từng thay đổi bằng Git diff:`);
   console.log(`   👉 git -C ${options.dir} diff\n`);
+}
+
+async function extractDigitalCover(pdfPath: string, coverPath: string): Promise<void> {
+  try {
+    await runVisionOcr(pdfPath, { startPage: 1, endPage: 1, extractCoverPath: coverPath });
+  } catch (err: any) {
+    console.warn(`   ⚠️ Không tạo được ảnh bìa (${err.message}). Dùng --cover để truyền ảnh bìa.`);
+  }
+}
+
+function printDigitalReport(
+  report: DigitalStructureReport,
+  navigation: PdfDigitalNavigation,
+  scratchDir: string,
+  baseName: string
+): void {
+  const percent = (report.coverage * 100).toFixed(2);
+  console.log(`   📊 Kiểm tra: ${report.matchedHeadings}/${report.tocEntries} tiêu đề khớp, nội dung giữ lại ${percent}% (${report.matchedWords}/${report.sourceWords} từ)`);
+  console.log(`   🧹 Đã bỏ ${report.removedMarginLines} dòng lề trang.`);
+
+  for (const item of report.unmatchedHeadings) {
+    console.warn(`   ⚠️ Không tìm thấy tiêu đề trong thân sách: "${item.title}" (trang ${item.page})`);
+  }
+  if (report.coverage < 0.995) {
+    console.warn(`   ⚠️ Nội dung có thể bị thiếu. Các từ thiếu nhiều nhất: ${report.topMissingWords.map(([w, n]) => `${w}(${n})`).join(', ')}`);
+  }
+  if (report.pagesWithInlineImages.length > 0) {
+    console.warn(`   ⚠️ Các trang có hình chưa được đưa vào EPUB: ${report.pagesWithInlineImages.join(', ')}`);
+  }
+
+  const reportPath = path.join(scratchDir, `pdf_report_${baseName}.json`);
+  fs.writeFileSync(reportPath, JSON.stringify({ ...report, entries: navigation.entries }, null, 2), 'utf-8');
+  console.log(`   📝 Báo cáo chi tiết: ${reportPath}`);
 }
 
 main().catch((err) => {

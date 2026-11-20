@@ -118,13 +118,12 @@ export async function runVisionOcr(
             pageNumber: pageNum,
             width: data.width,
             height: data.height,
-            isPhotoPlate: data.isPhotoPlate
+            bbox: data.bbox
           };
           const existing = pages.find((p) => p.pageNumber === pageNum);
           if (existing) {
             if (!existing.images) existing.images = [];
             existing.images.push(imgItem);
-            existing.isPhotoPlate = data.isPhotoPlate;
           } else {
             const list = pendingPageImages.get(pageNum) || [];
             list.push(imgItem);
@@ -138,8 +137,7 @@ export async function runVisionOcr(
             pageNumber: data.pageNumber,
             lines,
             rawText,
-            images: pageImages.length > 0 ? pageImages : undefined,
-            isPhotoPlate: pageImages.some((im) => im.isPhotoPlate)
+            images: pageImages.length > 0 ? pageImages : undefined
           });
         } else if (data.type === 'error') {
           console.error(`❌ Vision OCR Error: ${data.message}`);

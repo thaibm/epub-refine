@@ -8,12 +8,14 @@ import { loadEpubFromDir } from '../core/epubArchive.js';
 import { FootnoteProcessor } from '../core/footnoteProcessor.js';
 import type { HeadingItem } from '../types/index.js';
 import type { SourceEpubMeta } from '../core/epubArchive.js';
+import { escapeXml } from './digitalStructure.js';
 
 export interface ChapterDraft {
   id: string;
   title: string;
   htmlBody: string;
   level: number;
+  frontMatter?: boolean; // Đặt trước trang mục lục EPUB trong spine
 }
 
 export interface WorkspaceCreationOptions {
@@ -47,6 +49,22 @@ p {
 
 p.no-indent, .footnotes p {
   text-indent: 0;
+}
+
+.text-center, .pdf-front-matter p {
+  text-align: center;
+  text-indent: 0;
+}
+
+.text-right {
+  text-align: right;
+  text-indent: 0;
+}
+
+.pdf-front-matter .book-title {
+  font-size: 1.6em;
+  font-weight: bold;
+  line-height: 1.3;
 }
 
 blockquote {
@@ -238,7 +256,7 @@ export async function buildEpubWorkspace(
 </head>
 <body>
   <div class="cover-image">
-    <img src="images/cover.jpg" alt="Bìa sách ${options.bookTitle}"/>
+    <img src="images/cover.jpg" alt="Bìa sách ${escapeXml(options.bookTitle)}"/>
   </div>
 </body>
 </html>
@@ -258,7 +276,7 @@ export async function buildEpubWorkspace(
 </head>
 <body>
   <div class="cover-image">
-    <img src="images/back_cover.jpg" alt="Bìa sau ${options.bookTitle}"/>
+    <img src="images/back_cover.jpg" alt="Bìa sau ${escapeXml(options.bookTitle)}"/>
   </div>
 </body>
 </html>
@@ -304,7 +322,7 @@ export async function buildEpubWorkspace(
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="vi" lang="vi">
 <head>
-  <title>${ch.title}</title>
+  <title>${escapeXml(ch.title)}</title>
   <meta charset="utf-8"/>
   <link rel="stylesheet" type="text/css" href="styles.css"/>
 </head>
@@ -367,8 +385,13 @@ ${bodyInner}
   if (hasCoverImage) {
     spineItems.push(`    <itemref idref="cover" linear="no"/>`);
   }
+  const frontChapters = chapters.filter((ch) => ch.frontMatter);
+  const mainChapters = chapters.filter((ch) => !ch.frontMatter);
+  for (const ch of frontChapters) {
+    spineItems.push(`    <itemref idref="${ch.id}"/>`);
+  }
   spineItems.push(`    <itemref idref="nav"/>`);
-  for (const ch of chapters) {
+  for (const ch of mainChapters) {
     spineItems.push(`    <itemref idref="${ch.id}"/>`);
   }
   if (hasBackCoverImage) {
@@ -378,10 +401,10 @@ ${bodyInner}
   const opfXml = `<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
-    <dc:title>${options.bookTitle}</dc:title>
+    <dc:title>${escapeXml(options.bookTitle)}</dc:title>
     <dc:language>vi</dc:language>
     <dc:identifier id="BookId">${bookUid}</dc:identifier>
-    ${options.author ? `<dc:creator>${options.author}</dc:creator>` : ''}
+    ${options.author ? `<dc:creator>${escapeXml(options.author)}</dc:creator>` : ''}
     <meta property="dcterms:modified">${new Date().toISOString().replace(/\.[0-9]+Z$/, 'Z')}</meta>
     ${hasCoverImage ? '<meta name="cover" content="cover-image"/>' : ''}
   </metadata>
@@ -394,7 +417,7 @@ ${spineItems.join('\n')}
   <guide>
     ${hasCoverImage ? '<reference type="cover" title="Bìa sách" href="cover.xhtml"/>' : ''}
     <reference type="toc" title="Mục lục" href="nav.xhtml"/>
-    <reference type="text" title="Nội dung" href="${chapters[0]?.id || 'part0001'}.xhtml"/>
+    <reference type="text" title="Nội dung" href="${mainChapters[0]?.id || 'part0001'}.xhtml"/>
   </guide>
 </package>
 `;

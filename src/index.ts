@@ -363,7 +363,12 @@ async function main() {
         !isGenericSplitPrefix &&
         unpacked.hasFile(companion000ZipPath);
 
-      if (isTrueContinuationSplit) {
+      // File dựng từ mục lục PDF đã có heading đúng cấp (H1/H2/H3), không được ép về H1
+      const hasPdfStructure = proc.$('.pdf-toc-heading, .pdf-front-matter').length > 0;
+
+      if (hasPdfStructure) {
+        console.log(`   ℹ️ Giữ nguyên cấu trúc heading dựng từ mục lục PDF.`);
+      } else if (isTrueContinuationSplit) {
         console.log(`   ℹ️ File này là phần nối tiếp của ${companion000Name}. Giữ nguyên thân bài và không chèn H1 lặp lại.`);
         // Dọn dẹp H1 rác nhân tạo do AI từng chèn nhầm nếu có (chỉ thẻ mang class chapter-h1)
         if (proc.$('h1.chapter-h1').length > 0) {
